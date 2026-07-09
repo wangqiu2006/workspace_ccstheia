@@ -21,6 +21,28 @@
 #include <stdarg.h>
 
 /* ================================================================
+ *  编码器计数（双沿中断，volatile 保证中断和主循环间可见性）
+ * ================================================================ */
+static volatile int32_t enc_left  = 0;
+static volatile int32_t enc_right = 0;
+
+/* GROUP1 IRQ: 左编码器(GPIOA PA23/PA0) + 右编码器(GPIOB PB24/PB25) */
+void GROUP1_IRQHandler(void)
+{
+    /* 先判断是 GPIOA 还是 GPIOB 触发 */
+    if (DL_GPIO_getPendingInterrupt(GRP_ENC_LEFT_PORT)) {
+        DL_GPIO_clearInterruptStatus(GRP_ENC_LEFT_PORT,
+            GRP_ENC_LEFT_ENC_L_A_PIN | GRP_ENC_LEFT_ENC_L_B_PIN);
+        enc_left++;
+    }
+    if (DL_GPIO_getPendingInterrupt(GRP_ENC_RIGHT_PORT)) {
+        DL_GPIO_clearInterruptStatus(GRP_ENC_RIGHT_PORT,
+            GRP_ENC_RIGHT_ENC_R_A_PIN | GRP_ENC_RIGHT_ENC_R_B_PIN);
+        enc_right++;
+    }
+}
+
+/* ================================================================
  *  参数配置
  * ================================================================ */
 #define BASE_SPEED     1200U    /* 基础速度 [0,3200] */
@@ -55,10 +77,10 @@ static void uart_printf(const char *fmt, ...)
 }
 
 /* ================================================================
- *  电机控制（TIMA0 4通道）
- *  左电机: AIN1=CC0(PB14) AIN2=CC1(PA7)
- *  右电机: BIN1=CC2(PA15) BIN2=CC3(PA12)
- *  正转: IN1=duty IN2=0  反转: IN1=0 IN2=duty
+ *  电机控制（TIMA0 4通道 — 实测接线）
+ *  左电机: 正转=CC0(PB14) 反转=CC2(PA15)
+ *  右电机: 正转=CC1(PA7)  反转=CC3(PA12)
+ *  正转: 正PWM=duty 反PWM=0   反转: 正PWM=0 反PWM=duty
  * ================================================================ */
 static void motor_set(int32_t left, int32_t right)
 {
@@ -67,21 +89,21 @@ static void motor_set(int32_t left, int32_t right)
     if (right >  (int32_t)MOTOR_MAX) right =  (int32_t)MOTOR_MAX;
     if (right < -(int32_t)MOTOR_MAX) right = -(int32_t)MOTOR_MAX;
 
-    /* 左轮: AIN1(CC0)正转 AIN2(CC1)反转 */
+    /* 左轮: 正转=CC0(PB14) 反转=CC2(PA15) */
     if (left >= 0) {
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, (uint32_t)left, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, MOTOR_STOP,     DL_TIMER_CC_1_INDEX);
+        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, MOTOR_STOP,     DL_TIMER_CC_2_INDEX);
     } else {
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, MOTOR_STOP,      DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, (uint32_t)(-left), DL_TIMER_CC_1_INDEX);
+        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, (uint32_t)(-left), DL_TIMER_CC_2_INDEX);
     }
 
-    /* 右轮: BIN1(CC2)正转 BIN2(CC3)反转 */
+    /* 右轮: 正转=CC1(PA7) 反转=CC3(PA12) */
     if (right >= 0) {
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, (uint32_t)right, DL_TIMER_CC_2_INDEX);
+        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, (uint32_t)right, DL_TIMER_CC_1_INDEX);
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, MOTOR_STOP,      DL_TIMER_CC_3_INDEX);
     } else {
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, MOTOR_STOP,       DL_TIMER_CC_2_INDEX);
+        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, MOTOR_STOP,       DL_TIMER_CC_1_INDEX);
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, (uint32_t)(-right), DL_TIMER_CC_3_INDEX);
     }
 }
@@ -147,62 +169,43 @@ int main(void)
     SYSCFG_DL_init();
     delay_ms(200);
 
-    /* 先输出欢迎信息，确认UART正常 */
+    /* 使能编码器中断 */
+    NVIC_EnableIRQ(GRP_ENC_LEFT_INT_IRQN);
+    NVIC_EnableIRQ(GRP_ENC_RIGHT_INT_IRQN);
+
+    /* 欢迎信息 */
     uart_puts("\r\n=== 八路灰度巡线 MSPM0G3507 ===\r\n");
     uart_printf("BASE=%u KP=%d\r\n", BASE_SPEED, KP);
 
     /* 启动 TIMA0 PWM */
     DL_TimerA_startCounter(PWM_DRIVE_INST);
 
-    /* 闭合继电器，接通电机12V PB16 */
+    /* 闭合继电器 PB16 */
     DL_GPIO_setPins(GRP_RELAY_PORT, GRP_RELAY_MOTOR_PIN);
 
     delay_ms(500);
 
     uint8_t sensor[8];
+    int32_t snap_l, snap_r;
 
+    /* ── 巡线主循环 ── */
     while (1)
     {
-        /* 逐通道隔离测试：每次只开一路 PWM，其余全部为0 */
+        gray_scan_all(sensor);
+        line_follow(sensor);   /* P控制差速转向 */
 
-        /* CC0 = PB14 (AIN1) */
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 1200, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_2_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_3_INDEX);
-        uart_puts("CC0 (PB14/AIN1) ON\r\n");
-        delay_ms(2000);
+        /* 调试输出（稳定后可注释掉提高控制频率）*/
+        __disable_irq();
+        snap_l = enc_left;
+        snap_r = enc_right;
+        __enable_irq();
 
-        /* CC1 = PA7 (AIN2) */
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 1200, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_2_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_3_INDEX);
-        uart_puts("CC1 (PA7/AIN2) ON\r\n");
-        delay_ms(2000);
+        uart_printf("S:%d%d%d%d%d%d%d%d err=%d L=%d R=%d\r\n",
+                    sensor[0], sensor[1], sensor[2], sensor[3],
+                    sensor[4], sensor[5], sensor[6], sensor[7],
+                    (int)calc_error(sensor),
+                    (int)snap_l, (int)snap_r);
 
-        /* CC2 = PA15 (BIN1) */
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 1200, DL_TIMER_CC_2_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_3_INDEX);
-        uart_puts("CC2 (PA15/BIN1) ON\r\n");
-        delay_ms(2000);
-
-        /* CC3 = PA12 (BIN2) */
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,    0, DL_TIMER_CC_2_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 1200, DL_TIMER_CC_3_INDEX);
-        uart_puts("CC3 (PA12/BIN2) ON\r\n");
-        delay_ms(2000);
-
-        /* 全停 */
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 0, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 0, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 0, DL_TIMER_CC_2_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, 0, DL_TIMER_CC_3_INDEX);
-        uart_puts("STOP\r\n");
-        delay_ms(1000);
+        delay_ms(10);   /* 100Hz 控制频率 */
     }
 }
