@@ -46,7 +46,8 @@ void GROUP1_IRQHandler(void)
  *  参数配置
  * ================================================================ */
 #define BASE_SPEED     1200U    /* 基础速度 [0,3200] */
-#define KP             120      /* P系数 */
+#define KP             120     /* 位置P系数 */
+#define KS             6       /* 速度平衡系数: 太大振荡 太小收敛慢 */
 #define MOTOR_MAX      3200U
 #define MOTOR_STOP     0U
 
@@ -155,10 +156,30 @@ static int32_t calc_error(const uint8_t data[8])
 
 static void line_follow(const uint8_t data[8])
 {
+    static int32_t prev_l = 0, prev_r = 0, bias = 0;
+
     int32_t err = calc_error(data);
-    if (err == 127) { motor_stop(); return; }
-    int32_t cor   = (err * KP) / 10;
-    motor_set((int32_t)BASE_SPEED + cor, (int32_t)BASE_SPEED - cor);
+    if (err == 127) { motor_stop(); bias = 0; return; }
+
+    int32_t steer = (err * KP) / 10;
+
+    /* 读编码器增量，关中断防撕裂 */
+    int32_t cur_l, cur_r;
+    __disable_irq();
+    cur_l = enc_left;  cur_r = enc_right;
+    __enable_irq();
+
+    int32_t dl = cur_l - prev_l;
+    int32_t dr = cur_r - prev_r;
+    prev_l = cur_l;  prev_r = cur_r;
+
+    /* 积分速度平衡: 左快 → bias 正增 → 右轮多补 */
+    bias += (dl - dr) * KS / 10;
+    if (bias >  500) bias =  500;
+    if (bias < -500) bias = -500;
+
+    motor_set((int32_t)BASE_SPEED + steer,
+              (int32_t)BASE_SPEED - steer + bias);
 }
 
 /* ================================================================
