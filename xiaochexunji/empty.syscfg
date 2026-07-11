@@ -128,3 +128,15 @@ UART1.rxPinConfig.onlyInternalResistor   = scripting.forceWrite(false);
 UART1.rxPinConfig.passedPeripheralType   = scripting.forceWrite("Digital");
 
 SYSCTL.forceDefaultClkConfig = true;
+
+/* ── PID 控制定时器 TIMG0，100Hz 周期中断 ──
+ * BUSCLK=32MHz, DIV8→4MHz, period=39999→100Hz (10ms)
+ */
+const TIMER   = scripting.addModule("/ti/driverlib/TIMER", {}, false);
+const TIMER1  = TIMER.addInstance();
+TIMER1.$name                       = "TIMER_PID";
+TIMER1.timerMode                   = "PERIODIC";
+TIMER1.timerClkDiv                 = 8;
+TIMER1.timerPeriod                 = "10 ms";
+TIMER1.interrupts                  = ["ZERO"];
+TIMER1.peripheral.$assign          = "TIMG0";

@@ -109,6 +109,14 @@ extern "C" {
 
 
 
+/* Defines for TIMER_PID */
+#define TIMER_PID_INST                                                   (TIMG0)
+#define TIMER_PID_INST_IRQHandler                               TIMG0_IRQHandler
+#define TIMER_PID_INST_INT_IRQN                                 (TIMG0_INT_IRQn)
+#define TIMER_PID_INST_LOAD_VALUE                                       (39999U)
+
+
+
 /* Defines for UART_JDY31 */
 #define UART_JDY31_INST                                                    UART0
 #define UART_JDY31_INST_FREQUENCY                                       32000000
@@ -191,6 +199,7 @@ void SYSCFG_DL_initPower(void);
 void SYSCFG_DL_GPIO_init(void);
 void SYSCFG_DL_SYSCTL_init(void);
 void SYSCFG_DL_PWM_DRIVE_init(void);
+void SYSCFG_DL_TIMER_PID_init(void);
 void SYSCFG_DL_UART_JDY31_init(void);
 
 

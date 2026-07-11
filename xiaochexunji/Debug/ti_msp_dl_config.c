@@ -53,9 +53,11 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     /* Module-Specific Initializations*/
     SYSCFG_DL_SYSCTL_init();
     SYSCFG_DL_PWM_DRIVE_init();
+    SYSCFG_DL_TIMER_PID_init();
     SYSCFG_DL_UART_JDY31_init();
     /* Ensure backup structures have no valid state */
 	gPWM_DRIVEBackup.backupRdy 	= false;
+
 
 
 }
@@ -87,11 +89,13 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_GPIO_reset(GPIOA);
     DL_GPIO_reset(GPIOB);
     DL_TimerA_reset(PWM_DRIVE_INST);
+    DL_TimerG_reset(TIMER_PID_INST);
     DL_UART_Main_reset(UART_JDY31_INST);
 
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
     DL_TimerA_enablePower(PWM_DRIVE_INST);
+    DL_TimerG_enablePower(TIMER_PID_INST);
     DL_UART_Main_enablePower(UART_JDY31_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
@@ -241,6 +245,45 @@ SYSCONFIG_WEAK void SYSCFG_DL_PWM_DRIVE_init(void) {
 
     
     DL_TimerA_setCCPDirection(PWM_DRIVE_INST , DL_TIMER_CC0_OUTPUT | DL_TIMER_CC1_OUTPUT | DL_TIMER_CC2_OUTPUT | DL_TIMER_CC3_OUTPUT );
+
+
+}
+
+
+
+/*
+ * Timer clock configuration to be sourced by BUSCLK /  (4000000 Hz)
+ * timerClkFreq = (timerClkSrc / (timerClkDivRatio * (timerClkPrescale + 1)))
+ *   4000000 Hz = 4000000 Hz / (8 * (0 + 1))
+ */
+static const DL_TimerG_ClockConfig gTIMER_PIDClockConfig = {
+    .clockSel    = DL_TIMER_CLOCK_BUSCLK,
+    .divideRatio = DL_TIMER_CLOCK_DIVIDE_8,
+    .prescale    = 0U,
+};
+
+/*
+ * Timer load value (where the counter starts from) is calculated as (timerPeriod * timerClockFreq) - 1
+ * TIMER_PID_INST_LOAD_VALUE = (10 ms * 4000000 Hz) - 1
+ */
+static const DL_TimerG_TimerConfig gTIMER_PIDTimerConfig = {
+    .period     = TIMER_PID_INST_LOAD_VALUE,
+    .timerMode  = DL_TIMER_TIMER_MODE_PERIODIC,
+    .startTimer = DL_TIMER_STOP,
+};
+
+SYSCONFIG_WEAK void SYSCFG_DL_TIMER_PID_init(void) {
+
+    DL_TimerG_setClockConfig(TIMER_PID_INST,
+        (DL_TimerG_ClockConfig *) &gTIMER_PIDClockConfig);
+
+    DL_TimerG_initTimerMode(TIMER_PID_INST,
+        (DL_TimerG_TimerConfig *) &gTIMER_PIDTimerConfig);
+    DL_TimerG_enableInterrupt(TIMER_PID_INST , DL_TIMERG_INTERRUPT_ZERO_EVENT);
+    DL_TimerG_enableClock(TIMER_PID_INST);
+
+
+
 
 
 }
