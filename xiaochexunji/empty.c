@@ -122,12 +122,12 @@ int main(void)
         read_all_sensors();
         int8_t err = calc_error();
 
-        /* err<0 → 偏左 → 右转 (左轮加速) */
-        /* err>0 → 偏右 → 左转 (右轮加速) */
+        /* err<0 → 偏左 → 右转 (右轮加速) */
+        /* err>0 → 偏右 → 左转 (左轮加速) */
         int32_t steer = (int32_t)err * STEER_K;
 
-        int32_t left_spd  = SPEED_BASE + steer;
-        int32_t right_spd = SPEED_BASE - steer;
+        int32_t left_spd  = SPEED_BASE - steer;
+        int32_t right_spd = SPEED_BASE + steer;
 
         motor_set(left_spd, right_spd);
         delay_ms(10);
