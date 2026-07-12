@@ -13,7 +13,8 @@
  *  可调参数
  * ================================================================ */
 #define SPEED_BASE        400     /* 直线基础速度 PWM */
-#define STEER_K            15     /* 转向比例系数 (PWM / err) */
+#define STEER_K            40     /* 转向比例系数 (PWM / err) */
+#define STEER_MIN          200    /* 最小差速量，防止小弯无力 */
 #define MOTOR_MAX         3200
 #define ACTIVE_LEVEL        1     /* 1=黑线检测到, 0=白底 */
 
@@ -124,7 +125,12 @@ int main(void)
 
         /* err<0 → 偏左 → 右转 (右轮加速) */
         /* err>0 → 偏右 → 左转 (左轮加速) */
+        int32_t abs_err = err < 0 ? -err : err;
         int32_t steer = (int32_t)err * STEER_K;
+
+        /* 差速兜底：确保打滑时有足够的转向力 */
+        if (abs_err >= 4 && steer > 0 && steer < STEER_MIN) steer =  STEER_MIN;
+        if (abs_err >= 4 && steer < 0 && steer > -STEER_MIN) steer = -STEER_MIN;
 
         int32_t left_spd  = SPEED_BASE - steer;
         int32_t right_spd = SPEED_BASE + steer;
