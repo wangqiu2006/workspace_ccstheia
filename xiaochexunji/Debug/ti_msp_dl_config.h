@@ -109,34 +109,6 @@ extern "C" {
 
 
 
-/* Defines for TIMER_PID */
-#define TIMER_PID_INST                                                   (TIMG0)
-#define TIMER_PID_INST_IRQHandler                               TIMG0_IRQHandler
-#define TIMER_PID_INST_INT_IRQN                                 (TIMG0_INT_IRQn)
-#define TIMER_PID_INST_LOAD_VALUE                                       (39999U)
-
-
-
-/* Defines for UART_JDY31 */
-#define UART_JDY31_INST                                                    UART0
-#define UART_JDY31_INST_FREQUENCY                                       32000000
-#define UART_JDY31_INST_IRQHandler                              UART0_IRQHandler
-#define UART_JDY31_INST_INT_IRQN                                  UART0_INT_IRQn
-#define GPIO_UART_JDY31_RX_PORT                                            GPIOA
-#define GPIO_UART_JDY31_TX_PORT                                            GPIOA
-#define GPIO_UART_JDY31_RX_PIN                                    DL_GPIO_PIN_11
-#define GPIO_UART_JDY31_TX_PIN                                    DL_GPIO_PIN_10
-#define GPIO_UART_JDY31_IOMUX_RX                                 (IOMUX_PINCM22)
-#define GPIO_UART_JDY31_IOMUX_TX                                 (IOMUX_PINCM21)
-#define GPIO_UART_JDY31_IOMUX_RX_FUNC                  IOMUX_PINCM22_PF_UART0_RX
-#define GPIO_UART_JDY31_IOMUX_TX_FUNC                  IOMUX_PINCM21_PF_UART0_TX
-#define UART_JDY31_BAUD_RATE                                            (115200)
-#define UART_JDY31_IBRD_32_MHZ_115200_BAUD                                  (17)
-#define UART_JDY31_FBRD_32_MHZ_115200_BAUD                                  (23)
-
-
-
-
 
 /* Port definition for Pin Group GRP_GRAY */
 #define GRP_GRAY_PORT                                                    (GPIOA)
@@ -156,40 +128,12 @@ extern "C" {
 /* Defines for OUT: GPIOA.27 with pinCMx 60 on package pin 31 */
 #define GRP_GRAY_OUT_OUT_PIN                                    (DL_GPIO_PIN_27)
 #define GRP_GRAY_OUT_OUT_IOMUX                                   (IOMUX_PINCM60)
-/* Port definition for Pin Group GRP_RELAY */
-#define GRP_RELAY_PORT                                                   (GPIOB)
+/* Port definition for Pin Group GRP_SLEEP */
+#define GRP_SLEEP_PORT                                                   (GPIOB)
 
-/* Defines for MOTOR: GPIOB.16 with pinCMx 33 on package pin 4 */
-#define GRP_RELAY_MOTOR_PIN                                     (DL_GPIO_PIN_16)
-#define GRP_RELAY_MOTOR_IOMUX                                    (IOMUX_PINCM33)
-/* Port definition for Pin Group GRP_ENC_LEFT */
-#define GRP_ENC_LEFT_PORT                                                (GPIOA)
-
-/* Defines for ENC_L_A: GPIOA.23 with pinCMx 53 on package pin 24 */
-// pins affected by this interrupt request:["ENC_L_A","ENC_L_B"]
-#define GRP_ENC_LEFT_INT_IRQN                                   (GPIOA_INT_IRQn)
-#define GRP_ENC_LEFT_INT_IIDX                   (DL_INTERRUPT_GROUP1_IIDX_GPIOA)
-#define GRP_ENC_LEFT_ENC_L_A_IIDX                           (DL_GPIO_IIDX_DIO23)
-#define GRP_ENC_LEFT_ENC_L_A_PIN                                (DL_GPIO_PIN_23)
-#define GRP_ENC_LEFT_ENC_L_A_IOMUX                               (IOMUX_PINCM53)
-/* Defines for ENC_L_B: GPIOA.0 with pinCMx 1 on package pin 33 */
-#define GRP_ENC_LEFT_ENC_L_B_IIDX                            (DL_GPIO_IIDX_DIO0)
-#define GRP_ENC_LEFT_ENC_L_B_PIN                                 (DL_GPIO_PIN_0)
-#define GRP_ENC_LEFT_ENC_L_B_IOMUX                                (IOMUX_PINCM1)
-/* Port definition for Pin Group GRP_ENC_RIGHT */
-#define GRP_ENC_RIGHT_PORT                                               (GPIOB)
-
-/* Defines for ENC_R_A: GPIOB.24 with pinCMx 52 on package pin 23 */
-// pins affected by this interrupt request:["ENC_R_A","ENC_R_B"]
-#define GRP_ENC_RIGHT_INT_IRQN                                  (GPIOB_INT_IRQn)
-#define GRP_ENC_RIGHT_INT_IIDX                  (DL_INTERRUPT_GROUP1_IIDX_GPIOB)
-#define GRP_ENC_RIGHT_ENC_R_A_IIDX                          (DL_GPIO_IIDX_DIO24)
-#define GRP_ENC_RIGHT_ENC_R_A_PIN                               (DL_GPIO_PIN_24)
-#define GRP_ENC_RIGHT_ENC_R_A_IOMUX                              (IOMUX_PINCM52)
-/* Defines for ENC_R_B: GPIOB.25 with pinCMx 56 on package pin 27 */
-#define GRP_ENC_RIGHT_ENC_R_B_IIDX                          (DL_GPIO_IIDX_DIO25)
-#define GRP_ENC_RIGHT_ENC_R_B_PIN                               (DL_GPIO_PIN_25)
-#define GRP_ENC_RIGHT_ENC_R_B_IOMUX                              (IOMUX_PINCM56)
+/* Defines for SLEEP: GPIOB.16 with pinCMx 33 on package pin 4 */
+#define GRP_SLEEP_SLEEP_PIN                                     (DL_GPIO_PIN_16)
+#define GRP_SLEEP_SLEEP_IOMUX                                    (IOMUX_PINCM33)
 
 
 /* clang-format on */
@@ -199,8 +143,6 @@ void SYSCFG_DL_initPower(void);
 void SYSCFG_DL_GPIO_init(void);
 void SYSCFG_DL_SYSCTL_init(void);
 void SYSCFG_DL_PWM_DRIVE_init(void);
-void SYSCFG_DL_TIMER_PID_init(void);
-void SYSCFG_DL_UART_JDY31_init(void);
 
 
 bool SYSCFG_DL_saveConfiguration(void);

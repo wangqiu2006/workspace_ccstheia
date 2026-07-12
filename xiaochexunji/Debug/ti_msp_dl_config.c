@@ -53,12 +53,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     /* Module-Specific Initializations*/
     SYSCFG_DL_SYSCTL_init();
     SYSCFG_DL_PWM_DRIVE_init();
-    SYSCFG_DL_TIMER_PID_init();
-    SYSCFG_DL_UART_JDY31_init();
     /* Ensure backup structures have no valid state */
 	gPWM_DRIVEBackup.backupRdy 	= false;
-
-
 
 }
 /*
@@ -89,14 +85,10 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_GPIO_reset(GPIOA);
     DL_GPIO_reset(GPIOB);
     DL_TimerA_reset(PWM_DRIVE_INST);
-    DL_TimerG_reset(TIMER_PID_INST);
-    DL_UART_Main_reset(UART_JDY31_INST);
 
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
     DL_TimerA_enablePower(PWM_DRIVE_INST);
-    DL_TimerG_enablePower(TIMER_PID_INST);
-    DL_UART_Main_enablePower(UART_JDY31_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
 
@@ -112,11 +104,6 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
     DL_GPIO_initPeripheralOutputFunction(GPIO_PWM_DRIVE_C3_IOMUX,GPIO_PWM_DRIVE_C3_IOMUX_FUNC);
     DL_GPIO_enableOutput(GPIO_PWM_DRIVE_C3_PORT, GPIO_PWM_DRIVE_C3_PIN);
 
-    DL_GPIO_initPeripheralOutputFunction(
-        GPIO_UART_JDY31_IOMUX_TX, GPIO_UART_JDY31_IOMUX_TX_FUNC);
-    DL_GPIO_initPeripheralInputFunction(
-        GPIO_UART_JDY31_IOMUX_RX, GPIO_UART_JDY31_IOMUX_RX_FUNC);
-
     DL_GPIO_initDigitalOutput(GRP_GRAY_AD0_IOMUX);
 
     DL_GPIO_initDigitalOutput(GRP_GRAY_AD1_IOMUX);
@@ -127,21 +114,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
 		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
 		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
 
-    DL_GPIO_initDigitalOutput(GRP_RELAY_MOTOR_IOMUX);
-
-    DL_GPIO_initDigitalInputFeatures(GRP_ENC_LEFT_ENC_L_A_IOMUX,
-		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-
-    DL_GPIO_initDigitalInput(GRP_ENC_LEFT_ENC_L_B_IOMUX);
-
-    DL_GPIO_initDigitalInputFeatures(GRP_ENC_RIGHT_ENC_R_A_IOMUX,
-		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
-
-    DL_GPIO_initDigitalInputFeatures(GRP_ENC_RIGHT_ENC_R_B_IOMUX,
-		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
-		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+    DL_GPIO_initDigitalOutput(GRP_SLEEP_SLEEP_IOMUX);
 
     DL_GPIO_clearPins(GPIOA, GRP_GRAY_AD0_PIN |
 		GRP_GRAY_AD1_PIN |
@@ -149,20 +122,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
     DL_GPIO_enableOutput(GPIOA, GRP_GRAY_AD0_PIN |
 		GRP_GRAY_AD1_PIN |
 		GRP_GRAY_AD2_PIN);
-    DL_GPIO_setLowerPinsPolarity(GPIOA, DL_GPIO_PIN_0_EDGE_RISE_FALL);
-    DL_GPIO_setUpperPinsPolarity(GPIOA, DL_GPIO_PIN_23_EDGE_RISE_FALL);
-    DL_GPIO_clearInterruptStatus(GPIOA, GRP_ENC_LEFT_ENC_L_A_PIN |
-		GRP_ENC_LEFT_ENC_L_B_PIN);
-    DL_GPIO_enableInterrupt(GPIOA, GRP_ENC_LEFT_ENC_L_A_PIN |
-		GRP_ENC_LEFT_ENC_L_B_PIN);
-    DL_GPIO_clearPins(GPIOB, GRP_RELAY_MOTOR_PIN);
-    DL_GPIO_enableOutput(GPIOB, GRP_RELAY_MOTOR_PIN);
-    DL_GPIO_setUpperPinsPolarity(GPIOB, DL_GPIO_PIN_24_EDGE_RISE_FALL |
-		DL_GPIO_PIN_25_EDGE_RISE_FALL);
-    DL_GPIO_clearInterruptStatus(GPIOB, GRP_ENC_RIGHT_ENC_R_A_PIN |
-		GRP_ENC_RIGHT_ENC_R_B_PIN);
-    DL_GPIO_enableInterrupt(GPIOB, GRP_ENC_RIGHT_ENC_R_A_PIN |
-		GRP_ENC_RIGHT_ENC_R_B_PIN);
+    DL_GPIO_clearPins(GRP_SLEEP_PORT, GRP_SLEEP_SLEEP_PIN);
+    DL_GPIO_enableOutput(GRP_SLEEP_PORT, GRP_SLEEP_SLEEP_PIN);
 
 }
 
@@ -249,75 +210,4 @@ SYSCONFIG_WEAK void SYSCFG_DL_PWM_DRIVE_init(void) {
 
 }
 
-
-
-/*
- * Timer clock configuration to be sourced by BUSCLK /  (4000000 Hz)
- * timerClkFreq = (timerClkSrc / (timerClkDivRatio * (timerClkPrescale + 1)))
- *   4000000 Hz = 4000000 Hz / (8 * (0 + 1))
- */
-static const DL_TimerG_ClockConfig gTIMER_PIDClockConfig = {
-    .clockSel    = DL_TIMER_CLOCK_BUSCLK,
-    .divideRatio = DL_TIMER_CLOCK_DIVIDE_8,
-    .prescale    = 0U,
-};
-
-/*
- * Timer load value (where the counter starts from) is calculated as (timerPeriod * timerClockFreq) - 1
- * TIMER_PID_INST_LOAD_VALUE = (10 ms * 4000000 Hz) - 1
- */
-static const DL_TimerG_TimerConfig gTIMER_PIDTimerConfig = {
-    .period     = TIMER_PID_INST_LOAD_VALUE,
-    .timerMode  = DL_TIMER_TIMER_MODE_PERIODIC,
-    .startTimer = DL_TIMER_STOP,
-};
-
-SYSCONFIG_WEAK void SYSCFG_DL_TIMER_PID_init(void) {
-
-    DL_TimerG_setClockConfig(TIMER_PID_INST,
-        (DL_TimerG_ClockConfig *) &gTIMER_PIDClockConfig);
-
-    DL_TimerG_initTimerMode(TIMER_PID_INST,
-        (DL_TimerG_TimerConfig *) &gTIMER_PIDTimerConfig);
-    DL_TimerG_enableInterrupt(TIMER_PID_INST , DL_TIMERG_INTERRUPT_ZERO_EVENT);
-    DL_TimerG_enableClock(TIMER_PID_INST);
-
-
-
-
-
-}
-
-
-static const DL_UART_Main_ClockConfig gUART_JDY31ClockConfig = {
-    .clockSel    = DL_UART_MAIN_CLOCK_BUSCLK,
-    .divideRatio = DL_UART_MAIN_CLOCK_DIVIDE_RATIO_1
-};
-
-static const DL_UART_Main_Config gUART_JDY31Config = {
-    .mode        = DL_UART_MAIN_MODE_NORMAL,
-    .direction   = DL_UART_MAIN_DIRECTION_TX_RX,
-    .flowControl = DL_UART_MAIN_FLOW_CONTROL_NONE,
-    .parity      = DL_UART_MAIN_PARITY_NONE,
-    .wordLength  = DL_UART_MAIN_WORD_LENGTH_8_BITS,
-    .stopBits    = DL_UART_MAIN_STOP_BITS_ONE
-};
-
-SYSCONFIG_WEAK void SYSCFG_DL_UART_JDY31_init(void)
-{
-    DL_UART_Main_setClockConfig(UART_JDY31_INST, (DL_UART_Main_ClockConfig *) &gUART_JDY31ClockConfig);
-
-    DL_UART_Main_init(UART_JDY31_INST, (DL_UART_Main_Config *) &gUART_JDY31Config);
-    /*
-     * Configure baud rate by setting oversampling and baud rate divisors.
-     *  Target baud rate: 115200
-     *  Actual baud rate: 115211.52
-     */
-    DL_UART_Main_setOversampling(UART_JDY31_INST, DL_UART_OVERSAMPLING_RATE_16X);
-    DL_UART_Main_setBaudRateDivisor(UART_JDY31_INST, UART_JDY31_IBRD_32_MHZ_115200_BAUD, UART_JDY31_FBRD_32_MHZ_115200_BAUD);
-
-
-
-    DL_UART_Main_enable(UART_JDY31_INST);
-}
 

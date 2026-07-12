@@ -8,12 +8,8 @@ const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const GPIO1  = GPIO.addInstance();
 const GPIO2  = GPIO.addInstance();
 const GPIO3  = GPIO.addInstance();
-const GPIO4  = GPIO.addInstance();
-const GPIO5  = GPIO.addInstance();
 const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const PWM1   = PWM.addInstance();
-const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
-const UART1  = UART.addInstance();
 const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
 
 const Board  = scripting.addModule("/ti/driverlib/Board", {}, false);
@@ -41,41 +37,13 @@ GPIO2.associatedPins[0].$name           = "OUT";
 GPIO2.associatedPins[0].direction       = "INPUT";
 GPIO2.associatedPins[0].pin.$assign     = "PA27";
 
-/* ── 继电器 GPIO_MOTOR_EN ── */
-GPIO3.$name                             = "GRP_RELAY";
+/* ── SLEEP/MOTOR_EN ── */
+GPIO3.$name                             = "GRP_SLEEP";
 GPIO3.associatedPins.create(1);
-GPIO3.associatedPins[0].$name           = "MOTOR";
+GPIO3.associatedPins[0].$name           = "SLEEP";
 GPIO3.associatedPins[0].direction       = "OUTPUT";
 GPIO3.associatedPins[0].initialValue    = "CLEARED";
 GPIO3.associatedPins[0].pin.$assign     = "PB16";
-
-/* ── 左编码器 PA23/PA0 ── */
-GPIO4.$name                             = "GRP_ENC_LEFT";
-GPIO4.associatedPins.create(2);
-GPIO4.associatedPins[0].$name           = "ENC_L_A";
-GPIO4.associatedPins[0].direction       = "INPUT";
-GPIO4.associatedPins[0].interruptEn     = true;
-GPIO4.associatedPins[0].polarity        = "RISE_FALL";
-GPIO4.associatedPins[0].pin.$assign     = "PA23";
-GPIO4.associatedPins[1].$name           = "ENC_L_B";
-GPIO4.associatedPins[1].direction       = "INPUT";
-GPIO4.associatedPins[1].interruptEn     = true;
-GPIO4.associatedPins[1].polarity        = "RISE_FALL";
-GPIO4.associatedPins[1].pin.$assign     = "PA0";
-
-/* ── 右编码器 PB24/PB25 ── */
-GPIO5.$name                             = "GRP_ENC_RIGHT";
-GPIO5.associatedPins.create(2);
-GPIO5.associatedPins[0].$name           = "ENC_R_A";
-GPIO5.associatedPins[0].direction       = "INPUT";
-GPIO5.associatedPins[0].interruptEn     = true;
-GPIO5.associatedPins[0].polarity        = "RISE_FALL";
-GPIO5.associatedPins[0].pin.$assign     = "PB24";
-GPIO5.associatedPins[1].$name           = "ENC_R_B";
-GPIO5.associatedPins[1].direction       = "INPUT";
-GPIO5.associatedPins[1].interruptEn     = true;
-GPIO5.associatedPins[1].polarity        = "RISE_FALL";
-GPIO5.associatedPins[1].pin.$assign     = "PB25";
 
 /* ── 电机PWM: TIMA0, 4CC, 10kHz ── */
 PWM1.$name                              = "PWM_DRIVE";
@@ -111,32 +79,4 @@ PWM1.ccp3PinConfig.hideOutputInversion  = scripting.forceWrite(false);
 PWM1.ccp3PinConfig.onlyInternalResistor = scripting.forceWrite(false);
 PWM1.ccp3PinConfig.passedPeripheralType = scripting.forceWrite("Digital");
 
-/* ── 串口 ── */
-UART1.$name                              = "UART_JDY31";
-UART1.targetBaudRate                     = 115200;
-UART1.peripheral.$assign                 = "UART0";
-UART1.peripheral.txPin.$assign           = "PA10";
-UART1.peripheral.rxPin.$assign           = "PA11";
-UART1.txPinConfig.$name                  = "ti_driverlib_gpio_GPIOPinGeneric5";
-UART1.txPinConfig.direction              = scripting.forceWrite("OUTPUT");
-UART1.txPinConfig.hideOutputInversion    = scripting.forceWrite(false);
-UART1.txPinConfig.onlyInternalResistor   = scripting.forceWrite(false);
-UART1.txPinConfig.passedPeripheralType   = scripting.forceWrite("Digital");
-UART1.rxPinConfig.$name                  = "ti_driverlib_gpio_GPIOPinGeneric6";
-UART1.rxPinConfig.hideOutputInversion    = scripting.forceWrite(false);
-UART1.rxPinConfig.onlyInternalResistor   = scripting.forceWrite(false);
-UART1.rxPinConfig.passedPeripheralType   = scripting.forceWrite("Digital");
-
 SYSCTL.forceDefaultClkConfig = true;
-
-/* ── PID 控制定时器 TIMG0，100Hz 周期中断 ──
- * BUSCLK=32MHz, DIV8→4MHz, period=39999→100Hz (10ms)
- */
-const TIMER   = scripting.addModule("/ti/driverlib/TIMER", {}, false);
-const TIMER1  = TIMER.addInstance();
-TIMER1.$name                       = "TIMER_PID";
-TIMER1.timerMode                   = "PERIODIC";
-TIMER1.timerClkDiv                 = 8;
-TIMER1.timerPeriod                 = "10 ms";
-TIMER1.interrupts                  = ["ZERO"];
-TIMER1.peripheral.$assign          = "TIMG0";
