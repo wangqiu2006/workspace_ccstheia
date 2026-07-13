@@ -12,9 +12,11 @@
 /* ================================================================
  *  可调参数
  * ================================================================ */
-#define SPEED_BASE        400     /* 直线基础速度 PWM */
-#define STEER_K            40     /* 转向比例系数 (PWM / err) */
-#define STEER_MIN          200    /* 最小差速量，防止小弯无力 */
+#define SPEED_MAX          800    /* 直道最高速度 */
+#define SPEED_MIN          350    /* 弯道最低速度 */
+#define TURN_MAX            500    /* 最大差速量 */
+#define STEER_K             30    /* 转向比例系数 */
+#define DEAD_ZONE             7    /* 死区 ±7 */
 #define MOTOR_MAX         3200
 #define ACTIVE_LEVEL        1     /* 1=黑线检测到, 0=白底 */
 
@@ -66,6 +68,8 @@ static void read_all_sensors(void)
  * ================================================================ */
 static const int8_t weight[8] = {-30, -20, -15, -5, 5, 15, 20, 30};
 
+static int8_t last_err = 0;
+
 static int8_t calc_error(void)
 {
     int16_t sum = 0;
@@ -78,8 +82,12 @@ static int8_t calc_error(void)
         }
     }
 
-    if (cnt == 0) return 0;   /* 丢线: 保持上次方向 */
-    return (int8_t)(sum / cnt);
+    if (cnt == 0) {
+        /* 丢线: 保持上次方向继续找, 不返回0 */
+        return last_err;
+    }
+    last_err = (int8_t)(sum / cnt);
+    return last_err;
 }
 
 /* ================================================================
@@ -119,23 +127,55 @@ int main(void)
     DL_TimerA_startCounter(PWM_DRIVE_INST);
     DL_GPIO_setPins(GRP_SLEEP_PORT, GRP_SLEEP_SLEEP_PIN);
 
+    static uint8_t edge = 0;  /* 0=正常, 1=左边缘转, 2=右边缘转 */
+
     while (1) {
         read_all_sensors();
         int8_t err = calc_error();
 
-        /* err<0 → 偏左 → 右转 (右轮加速) */
-        /* err>0 → 偏右 → 左转 (左轮加速) */
-        int32_t abs_err = err < 0 ? -err : err;
-        int32_t steer = (int32_t)err * STEER_K;
+        int32_t l, r;
 
-        /* 差速兜底：确保打滑时有足够的转向力 */
-        if (abs_err >= 4 && steer > 0 && steer < STEER_MIN) steer =  STEER_MIN;
-        if (abs_err >= 4 && steer < 0 && steer > -STEER_MIN) steer = -STEER_MIN;
+        /* ── 触发边缘标志 ── */
+        if (!edge && sensor[0] == ACTIVE_LEVEL) edge = 1;
+        if (!edge && sensor[7] == ACTIVE_LEVEL) edge = 2;
 
-        int32_t left_spd  = SPEED_BASE - steer;
-        int32_t right_spd = SPEED_BASE + steer;
+        /* ── 自适应速度: err越大越慢 ── */
+        int32_t ab = err < 0 ? -err : err;
+        int32_t spd = SPEED_MAX - (int32_t)ab * (SPEED_MAX - SPEED_MIN) / 30;
 
-        motor_set(left_spd, right_spd);
-        delay_ms(10);
+        /* ── 边缘转弯中: 原地甩 ── */
+        if (edge == 1) {
+            l =  1200; r = -1200;
+            if (sensor[3] == ACTIVE_LEVEL || sensor[4] == ACTIVE_LEVEL) edge = 0;
+        } else if (edge == 2) {
+            l = -1200; r =  1200;
+            if (sensor[3] == ACTIVE_LEVEL || sensor[4] == ACTIVE_LEVEL) edge = 0;
+        }
+        /* ── X2/X7 提前强转 ── */
+        else if (sensor[1] == ACTIVE_LEVEL) {
+            l = spd + 400; r = spd - 200;
+        } else if (sensor[6] == ACTIVE_LEVEL) {
+            l = spd - 200; r = spd + 400;
+        }
+        /* ── 死区直行 ── */
+        else if (err >= -DEAD_ZONE && err <= DEAD_ZONE) {
+            l = spd; r = spd;
+        }
+        /* ── 比例差速: 内轮保持前进, 靠快轮提速转向 ── */
+        else {
+            int32_t turn = (int32_t)err * STEER_K;
+            if (turn >  TURN_MAX) turn =  TURN_MAX;
+            if (turn < -TURN_MAX) turn = -TURN_MAX;
+            if (turn > 0) {
+                l = spd;           /* 内轮保持基准速 */
+                r = spd + turn;    /* 外轮提速 */
+            } else {
+                l = spd - turn;    /* 外轮提速 */
+                r = spd;           /* 内轮保持基准速 */
+            }
+        }
+
+        motor_set(l, r);
+        delay_ms(1);
     }
 }
