@@ -52,13 +52,13 @@ void SysTick_Handler(void)
 #define ACTIVE_LEVEL        1    /* 1=检测到黑线输出高电平                */
 
 /* ── 直角检测 ── */
-#define CORNER_DEBOUNCE     2    /* 连续N次(×4ms)确认才进弯               */
+#define CORNER_DEBOUNCE     1    /* 1次即触发(传感器可靠,无需多次确认)    */
 
 /* ── 直角过弯时间 (ms) ── */
 #define BRAKE_MS           80    /* 制动时间                              */
 #define TURN_MS           320    /* ★ 旋转时间: 转不到位加大, 转过头减小  */
-#define COOLDOWN_MS      800    /* 过弯后冷却窗口 — 此期间不检测直角     */
-                                 /*   改小可以更快响应下一个弯             */
+#define COOLDOWN_MS       800    /* 过弯后冷却: 只需防止同一个弯重触发    */
+                                 /*   必须 < 跑完一段直道的时间           */
 
 /* ── 转弯速度 (要慢) ── */
 #define CORNER_TURN_SPEED 500    /* ★ 原地转速 PWM                        */
