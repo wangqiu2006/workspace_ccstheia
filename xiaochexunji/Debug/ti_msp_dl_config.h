@@ -109,19 +109,15 @@ extern "C" {
 
 
 
+/* Defines for TIMER_0 */
+#define TIMER_0_INST                                                     (TIMG0)
+#define TIMER_0_INST_IRQHandler                                 TIMG0_IRQHandler
+#define TIMER_0_INST_INT_IRQN                                   (TIMG0_INT_IRQn)
+#define TIMER_0_INST_LOAD_VALUE                                         (15999U)
 
-/* Port definition for Pin Group GRP_GRAY */
-#define GRP_GRAY_PORT                                                    (GPIOA)
 
-/* Defines for AD0: GPIOA.24 with pinCMx 54 on package pin 25 */
-#define GRP_GRAY_AD0_PIN                                        (DL_GPIO_PIN_24)
-#define GRP_GRAY_AD0_IOMUX                                       (IOMUX_PINCM54)
-/* Defines for AD1: GPIOA.25 with pinCMx 55 on package pin 26 */
-#define GRP_GRAY_AD1_PIN                                        (DL_GPIO_PIN_25)
-#define GRP_GRAY_AD1_IOMUX                                       (IOMUX_PINCM55)
-/* Defines for AD2: GPIOA.26 with pinCMx 59 on package pin 30 */
-#define GRP_GRAY_AD2_PIN                                        (DL_GPIO_PIN_26)
-#define GRP_GRAY_AD2_IOMUX                                       (IOMUX_PINCM59)
+
+
 /* Port definition for Pin Group GRP_GRAY_OUT */
 #define GRP_GRAY_OUT_PORT                                                (GPIOA)
 
@@ -134,6 +130,18 @@ extern "C" {
 /* Defines for SLEEP: GPIOB.16 with pinCMx 33 on package pin 4 */
 #define GRP_SLEEP_SLEEP_PIN                                     (DL_GPIO_PIN_16)
 #define GRP_SLEEP_SLEEP_IOMUX                                    (IOMUX_PINCM33)
+/* Port definition for Pin Group GRP_GRAY */
+#define GRP_GRAY_PORT                                                    (GPIOA)
+
+/* Defines for AD0: GPIOA.24 with pinCMx 54 on package pin 25 */
+#define GRP_GRAY_AD0_PIN                                        (DL_GPIO_PIN_24)
+#define GRP_GRAY_AD0_IOMUX                                       (IOMUX_PINCM54)
+/* Defines for AD1: GPIOA.25 with pinCMx 55 on package pin 26 */
+#define GRP_GRAY_AD1_PIN                                        (DL_GPIO_PIN_25)
+#define GRP_GRAY_AD1_IOMUX                                       (IOMUX_PINCM55)
+/* Defines for AD2: GPIOA.26 with pinCMx 59 on package pin 30 */
+#define GRP_GRAY_AD2_PIN                                        (DL_GPIO_PIN_26)
+#define GRP_GRAY_AD2_IOMUX                                       (IOMUX_PINCM59)
 
 
 /* clang-format on */
@@ -143,6 +151,7 @@ void SYSCFG_DL_initPower(void);
 void SYSCFG_DL_GPIO_init(void);
 void SYSCFG_DL_SYSCTL_init(void);
 void SYSCFG_DL_PWM_DRIVE_init(void);
+void SYSCFG_DL_TIMER_0_init(void);
 
 
 bool SYSCFG_DL_saveConfiguration(void);

@@ -53,8 +53,10 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     /* Module-Specific Initializations*/
     SYSCFG_DL_SYSCTL_init();
     SYSCFG_DL_PWM_DRIVE_init();
+    SYSCFG_DL_TIMER_0_init();
     /* Ensure backup structures have no valid state */
 	gPWM_DRIVEBackup.backupRdy 	= false;
+
 
 }
 /*
@@ -85,10 +87,12 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_GPIO_reset(GPIOA);
     DL_GPIO_reset(GPIOB);
     DL_TimerA_reset(PWM_DRIVE_INST);
+    DL_TimerG_reset(TIMER_0_INST);
 
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
     DL_TimerA_enablePower(PWM_DRIVE_INST);
+    DL_TimerG_enablePower(TIMER_0_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
 
@@ -104,17 +108,17 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
     DL_GPIO_initPeripheralOutputFunction(GPIO_PWM_DRIVE_C3_IOMUX,GPIO_PWM_DRIVE_C3_IOMUX_FUNC);
     DL_GPIO_enableOutput(GPIO_PWM_DRIVE_C3_PORT, GPIO_PWM_DRIVE_C3_PIN);
 
-    DL_GPIO_initDigitalOutput(GRP_GRAY_AD0_IOMUX);
-
-    DL_GPIO_initDigitalOutput(GRP_GRAY_AD1_IOMUX);
-
-    DL_GPIO_initDigitalOutput(GRP_GRAY_AD2_IOMUX);
-
     DL_GPIO_initDigitalInputFeatures(GRP_GRAY_OUT_OUT_IOMUX,
 		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
 		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
 
     DL_GPIO_initDigitalOutput(GRP_SLEEP_SLEEP_IOMUX);
+
+    DL_GPIO_initDigitalOutput(GRP_GRAY_AD0_IOMUX);
+
+    DL_GPIO_initDigitalOutput(GRP_GRAY_AD1_IOMUX);
+
+    DL_GPIO_initDigitalOutput(GRP_GRAY_AD2_IOMUX);
 
     DL_GPIO_clearPins(GPIOA, GRP_GRAY_AD0_PIN |
 		GRP_GRAY_AD1_PIN |
@@ -206,6 +210,45 @@ SYSCONFIG_WEAK void SYSCFG_DL_PWM_DRIVE_init(void) {
 
     
     DL_TimerA_setCCPDirection(PWM_DRIVE_INST , DL_TIMER_CC0_OUTPUT | DL_TIMER_CC1_OUTPUT | DL_TIMER_CC2_OUTPUT | DL_TIMER_CC3_OUTPUT );
+
+
+}
+
+
+
+/*
+ * Timer clock configuration to be sourced by BUSCLK /  (32000000 Hz)
+ * timerClkFreq = (timerClkSrc / (timerClkDivRatio * (timerClkPrescale + 1)))
+ *   32000000 Hz = 32000000 Hz / (1 * (0 + 1))
+ */
+static const DL_TimerG_ClockConfig gTIMER_0ClockConfig = {
+    .clockSel    = DL_TIMER_CLOCK_BUSCLK,
+    .divideRatio = DL_TIMER_CLOCK_DIVIDE_1,
+    .prescale    = 0U,
+};
+
+/*
+ * Timer load value (where the counter starts from) is calculated as (timerPeriod * timerClockFreq) - 1
+ * TIMER_0_INST_LOAD_VALUE = (0.5 ms * 32000000 Hz) - 1
+ */
+static const DL_TimerG_TimerConfig gTIMER_0TimerConfig = {
+    .period     = TIMER_0_INST_LOAD_VALUE,
+    .timerMode  = DL_TIMER_TIMER_MODE_PERIODIC,
+    .startTimer = DL_TIMER_STOP,
+};
+
+SYSCONFIG_WEAK void SYSCFG_DL_TIMER_0_init(void) {
+
+    DL_TimerG_setClockConfig(TIMER_0_INST,
+        (DL_TimerG_ClockConfig *) &gTIMER_0ClockConfig);
+
+    DL_TimerG_initTimerMode(TIMER_0_INST,
+        (DL_TimerG_TimerConfig *) &gTIMER_0TimerConfig);
+    DL_TimerG_enableInterrupt(TIMER_0_INST , DL_TIMERG_INTERRUPT_ZERO_EVENT);
+    DL_TimerG_enableClock(TIMER_0_INST);
+
+
+
 
 
 }
