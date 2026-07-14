@@ -66,7 +66,7 @@ static uint8_t   scan_ch  = 0;
 
 /* ── 圈数计数 ── */
 static uint16_t  corner_count    = 0;  /* 已数到的弯数                   */
-static uint32_t  corner_unlock   = 0;  /* 解锁时刻(ms绝对值), 初值0=立即可用 */
+static uint32_t  corner_unlock   = 1000; /* 初值1000:上电1秒内屏蔽计数,防起跑误触发 */
 static uint8_t   finishing       = 0;  /* 1=最后一个弯已数到, 转完后停车 */
 static uint8_t   car_stopped     = 0;  /* 1=已停车                       */
 
@@ -164,8 +164,12 @@ void TIMER_0_INST_IRQHandler(void)
                             (sensor[7] == ACTIVE_LEVEL);
 
             if (finishing) {
-                /* 最后一个弯已数到: 锁定期结束 = 转弯已完成, 直接停车 */
-                if (now >= corner_unlock) {
+                /* 最后一个弯: 1s锁定到期 且 车已回到直道 才停车
+                 * 防止转弯还没完成就停在弯里 */
+                uint8_t on_straight = !outer &&
+                                      ((sensor[3] == ACTIVE_LEVEL) ||
+                                       (sensor[4] == ACTIVE_LEVEL));
+                if (now >= corner_unlock && on_straight) {
                     car_stopped = 1;
                     motor(0, 0);
                     break;
