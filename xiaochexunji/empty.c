@@ -49,12 +49,28 @@
 /* ── 传感器 ── */
 #define ACTIVE_LEVEL        1    /* 1=检测到黑线输出高电平               */
 
+/* ── 圈数控制 ── */
+#define TARGET_LAPS         1    /* ★ 目标圈数: 跑几圈后停车 (1/2/3/4…) */
+#define CORNERS_PER_LAP     4    /* 正方形跑道每圈4个直角                */
+#define CLEAR_CONFIRM      30    /* 回到直道确认×4ms=100ms, 才解锁       */
+#define LOCKOUT_TICKS     125    /* ★ 数到弯后强制锁定×4ms=500ms         */
+                                 /*   覆盖整个转弯过程, 期间绝不重复计数  */
+                                 /*   数少了(漏弯)减小, 数多了(重复)加大  */
+
 /* ================================================================
  *  全局变量
  * ================================================================ */
 static uint8_t   sensor[8];        /* X1~X8 最新值               */
 static int8_t    last_err = 0;     /* 上次误差 (丢线时保持方向)  */
 static uint8_t   scan_ch  = 0;     /* 当前MUX扫描通道            */
+
+/* ── 圈数计数 ── */
+static uint16_t  corner_count = 0; /* 已数到的直角总数            */
+static uint8_t   corner_armed = 0; /* 起跑=0锁定, 外侧先清空100ms才解锁 → 防起跑线误计 */
+static uint8_t   clear_cnt    = 0; /* 回到直道连续确认计数        */
+static uint16_t  lockout      = 0; /* 数弯后强制锁定倒计时(拍)    */
+static uint8_t   finishing    = 0; /* 1=圈数已够, 正转最后一个弯, 回到直道即停 */
+static uint8_t   car_stopped  = 0; /* 1=已完成圈数, 永久停车      */
 
 /* ================================================================
  *  MUX 选通 (74HC4051)
@@ -135,8 +151,64 @@ void TIMER_0_INST_IRQHandler(void)
 
         /* ======== 每 4ms 执行一次闭环控制 (250Hz) ======== */
 
+        /* ── 圈数到达: 永久停车 (低侧制动) ── */
+        if (car_stopped) {
+            motor(0, 0);
+            break;
+        }
+
         int8_t  err     = calc_err();
         int32_t abs_err = (err < 0) ? -err : err;
+
+        /* ── 数弯 + 圈数判断 (只观测, 不干预驾驶) ──
+         *   正方形每圈 CORNERS_PER_LAP 个直角.
+         *   最外侧传感器(X1/X8)亮 = 到达一个直角.
+         *
+         *   双重防重复计数:
+         *     1) 强制锁定期 lockout: 数到一个弯后无条件锁死 LOCKOUT_TICKS
+         *        (×4ms), 完整覆盖整个掉头过程. 期间既不计数也不解锁,
+         *        彻底屏蔽转弯中拐角线在阵列下反复扫动造成的抖动.
+         *     2) 回到直道确认: 锁定期结束后, 还需车真正回到新直道
+         *        (中间在线 且 外侧全灭) 连续 CLEAR_CONFIRM 次才解锁. */
+        {
+            uint8_t outer = (sensor[0] == ACTIVE_LEVEL) ||
+                            (sensor[7] == ACTIVE_LEVEL);
+
+            if (lockout) {
+                /* 强制锁定期: 倒计时, 期间完全不数弯不解锁 */
+                lockout--;
+            } else if (corner_armed) {
+                if (outer) {
+                    corner_count++;
+                    corner_armed = 0;           /* 锁定, 防重复计数 */
+                    clear_cnt    = 0;
+                    lockout      = LOCKOUT_TICKS;/* 启动强制锁定期  */
+                    if (corner_count >= (uint16_t)TARGET_LAPS * CORNERS_PER_LAP) {
+                        finishing = 1;          /* 圈数已够: 不立即停,
+                                                 * 正常转完这最后一个弯,
+                                                 * 回到起点直道后才停车. */
+                    }
+                }
+            } else {
+                /* 解锁条件: 车必须真正回到"新直道"上, 而不只是外侧瞬间清空.
+                 *   回到直道 = 中间(X4/X5)在线 且 两侧外侧(X1/X8)都灭.
+                 *   需连续 CLEAR_CONFIRM 次确认. */
+                uint8_t on_straight = ((sensor[3] == ACTIVE_LEVEL) ||
+                                       (sensor[4] == ACTIVE_LEVEL)) && !outer;
+                if (on_straight) {
+                    if (++clear_cnt >= CLEAR_CONFIRM) {
+                        if (finishing) {
+                            car_stopped = 1;    /* 最后一个弯已转完并回正 → 停 */
+                            motor(0, 0);
+                            break;
+                        }
+                        corner_armed = 1;       /* 正常解锁, 继续数下一个弯 */
+                    }
+                } else {
+                    clear_cnt = 0;
+                }
+            }
+        }
 
         /* ── 速度自适应: 直道快, 弯道慢 ──
          * abs_err=0  → SPEED_MAX  (直道全速)
