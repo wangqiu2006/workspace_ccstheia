@@ -11,12 +11,12 @@
             }
         },
         {
-            "name": "xiaochexunji",
+            "name": "xiaochexunji duoquan",
             "type": "ccs-debug",
             "request": "launch",
             "projectInfo": {
-                "name": "xiaochexunji",
-                "resourceId": "/xiaochexunji"
+                "name": "xiaochexunji duoquan",
+                "resourceId": "/xiaochexunji duoquan"
             }
         }
     ]
