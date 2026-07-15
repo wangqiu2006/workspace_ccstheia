@@ -21,7 +21,9 @@
  */
 
 #include "ti_msp_dl_config.h"
+#include "hlk_as201.h"
 #include <stdint.h>
+#include <math.h>
 
 /* ================================================================
  *  SysTick — 1ms 自由运行计数器
@@ -66,6 +68,21 @@ void SysTick_Handler(void)
                                  /*   必须 > 整个转弯过程耗时              */
                                  /*   必须 < 转弯+一段直道总耗时           */
 
+/* ── 陀螺仪辅助 (HLK-AS201, UART_GYRO=UART1 PA8/PA9, 20Hz 主动上报) ──
+ *   全部为"叠加增强": 陀螺仪没接/掉线时 gyro_ok=0, 下列逻辑自动跳过,
+ *   行为完全退回原纯灰度循迹, 不影响现有效果。                          */
+#define GYRO_ENABLE          1     /* 0=编译期完全禁用陀螺仪辅助            */
+#define GYRO_DAMP_K          6     /* ★ 直道阻尼增益: steer -= K*gz(°/s)   */
+                                   /*   越大越"稳"但反应钝, 0=关直道阻尼    */
+#define GYRO_DAMP_SIGN     (+1)    /* ★ 阻尼符号: 若开阻尼后直道更抖, 改 -1 */
+#define GYRO_DAMP_ERRLIM     6     /* 仅 |err|<=此值(近直道)才施加阻尼,     */
+                                   /*   避免干扰正常过弯                    */
+#define GYRO_DAMP_MAX      150     /* 阻尼项绝对上限, 防陀螺尖峰拉爆差速     */
+#define TURN_TARGET_DEG    82.0f   /* ★ 转弯判定角度(°): 累计转过此角+回中→结束 */
+                                   /*   略小于90°, 留出惯性余量; 抄近改小/转不够改大 */
+#define TURN_EASE_DEG      25.0f   /* 距目标角此度数内开始减速→转弯更平滑   */
+#define GYRO_LOST_MS       300     /* 超过此时间没有新帧→判掉线, 自动退回   */
+
 /* ================================================================
  *  全局变量
  * ================================================================ */
@@ -85,6 +102,16 @@ static uint8_t   pivot_state     = 0;
 static uint32_t  pivot_t_end     = 0;  /* 当前阶段结束时刻(ms)           */
 static int32_t   pivot_dir       = 1;  /* 转向方向: +1右 / -1左          */
 static uint32_t  pivot_unlock    = 0;  /* pivot冷却: 转完后锁定,防重复触发 */
+
+/* ── 陀螺仪辅助运行时状态 ── */
+static AS201_Handle g_gyro;             /* 驱动句柄                        */
+static uint8_t   gyro_ok        = 0;    /* 1=陀螺仪在线且数据有效          */
+static uint32_t  gyro_last_cnt  = 0;    /* 上次见到的有效帧计数(判掉线)    */
+static uint32_t  gyro_last_ms   = 0;    /* 上次收到新帧的时刻(ms)          */
+static float     gyro_gz        = 0.0f; /* 最新 Z 轴角速度 (°/s)           */
+static float     turn_accum_deg = 0.0f; /* pivot 原地转阶段累计转过角度(°) */
+/* 控制环固定 4ms 一拍 (scan_ch 归零), 积分用此固定 dt, 无需时间戳 */
+#define CTRL_DT_S          0.004f
 
 /* ================================================================
  *  MUX 选通 (74HC4051)
@@ -146,6 +173,44 @@ static void motor(int32_t l, int32_t r)
 }
 
 /* ================================================================
+ *  陀螺仪 UART RX 中断 — 只把字节收进环形缓冲, 解析在控制环里做
+ * ================================================================ */
+#if GYRO_ENABLE
+void UART_GYRO_INST_IRQHandler(void)
+{
+    AS201_ISR(&g_gyro);
+}
+#endif
+
+/* ================================================================
+ *  陀螺仪状态更新 — 在控制环 (250Hz) 里调用
+ *    解析缓冲 → 取最新 gz → 用帧计数+超时判断在线/掉线
+ * ================================================================ */
+static void gyro_update(uint32_t now)
+{
+#if GYRO_ENABLE
+    AS201_Poll(&g_gyro);
+
+    /* 有新数据帧: 刷新 gz 与在线时刻 */
+    if (AS201_HasNewFrame(&g_gyro, &gyro_last_cnt)) {
+        const AS201_Data *d = AS201_GetData(&g_gyro);
+        if (d != NULL && (d->update_flags & AS201_SUB_GYRO)) {
+            gyro_gz      = d->gyro.z;   /* °/s, 绕 Z 轴 (车体转向轴) */
+            gyro_last_ms = now;
+            gyro_ok      = 1;
+        }
+    }
+    /* 超时无新帧 → 判掉线, 自动退回纯灰度 */
+    if (gyro_ok && (uint32_t)(now - gyro_last_ms) > GYRO_LOST_MS) {
+        gyro_ok  = 0;
+        gyro_gz  = 0.0f;
+    }
+#else
+    (void)now;
+#endif
+}
+
+/* ================================================================
  *  2kHz ISR — 非阻塞扫描 + 250Hz 闭环控制
  * ================================================================ */
 void TIMER_0_INST_IRQHandler(void)
@@ -163,6 +228,9 @@ void TIMER_0_INST_IRQHandler(void)
         /* ── 每 4ms 执行一次控制 ── */
 
         uint32_t now = g_millis;
+
+        /* ── 陀螺仪解析/在线判定 (掉线自动退回纯灰度) ── */
+        gyro_update(now);
 
         /* ── 永久停车 ── */
         if (car_stopped) { motor(0, 0); break; }
@@ -215,6 +283,7 @@ void TIMER_0_INST_IRQHandler(void)
             if (now >= pivot_t_end) {
                 pivot_state = 2;
                 pivot_t_end = now + PIVOT_TURN_MS;  /* 原地转计时开始 */
+                turn_accum_deg = 0.0f;              /* 复位转弯角度累计器 */
             } else {
                 motor(PIVOT_ADV_SPEED, PIVOT_ADV_SPEED); /* 直行推进 */
                 break;
@@ -222,18 +291,45 @@ void TIMER_0_INST_IRQHandler(void)
         }
 
         if (pivot_state == 2) {
-            /* 原地重转: 计时到了 且 中间传感器回中 才结束
-             * 防止计时到了但车还没对准新直道就切回循迹
-             * 硬超时2秒: 防止S3/S4永远等不到时原地打转    */
+            /* 原地重转结束条件:
+             *   基础(无陀螺/掉线): 原计时到 且 中间回中, 或硬超时2秒 —— 原逻辑不变
+             *   增强(陀螺在线): 累计转角接近 TURN_TARGET_DEG 时按角度平滑收尾,
+             *                   接近目标角前 TURN_EASE_DEG 内线性减小转速→不过冲、更平滑
+             * 两条件是"或"关系: 满足任一即结束, 陀螺只会让它更早更稳地收尾, 不会卡死 */
             uint8_t centered = (sensor[3] == ACTIVE_LEVEL) ||
                                (sensor[4] == ACTIVE_LEVEL);
+
+            int32_t turn_steer = PIVOT_STEER;   /* 默认全力(退回原行为) */
+
+#if GYRO_ENABLE
+            if (gyro_ok) {
+                /* 4ms 定周期积分 gz(°/s) → 累计转过的角度(取绝对值, 与安装方向无关) */
+                float dps = gyro_gz;
+                float inc = dps * 0.004f;                 /* 4ms */
+                turn_accum_deg += (inc < 0.0f) ? -inc : inc;
+
+                float remain = TURN_TARGET_DEG - turn_accum_deg;
+                if (remain <= 0.0f) {
+                    /* 已转够角度 → 立即结束, 不必等计时/回中, 一致性最好 */
+                    pivot_state  = 0;
+                    pivot_unlock = now + 1000;
+                    break;
+                }
+                if (remain < TURN_EASE_DEG) {
+                    /* 进入缓冲区: 转速随剩余角度线性降低, 最低留 30% 防转不动 */
+                    float ratio = remain / TURN_EASE_DEG;      /* 1→0 */
+                    if (ratio < 0.30f) ratio = 0.30f;
+                    turn_steer = (int32_t)(PIVOT_STEER * ratio);
+                }
+            }
+#endif
             if ((now >= pivot_t_end && centered) ||
                 (now >= pivot_t_end + 2000)) {   /* 硬超时兜底 */
                 pivot_state  = 0;
                 pivot_unlock = now + 1000;
             } else {
-                motor(PIVOT_CREEP + pivot_dir * PIVOT_STEER,
-                      PIVOT_CREEP - pivot_dir * PIVOT_STEER);
+                motor(PIVOT_CREEP + pivot_dir * turn_steer,
+                      PIVOT_CREEP - pivot_dir * turn_steer);
                 break;
             }
         }
@@ -262,6 +358,21 @@ void TIMER_0_INST_IRQHandler(void)
             if (steer > 0 && steer <  STEER_MIN) steer =  STEER_MIN;
             if (steer < 0 && steer > -STEER_MIN) steer = -STEER_MIN;
         }
+
+        /* ── 陀螺仪直道阻尼 ──────────────────────────────────────
+         *  仅近直道(|err|小)且陀螺在线时施加: 用角速度 gz 做反向阻尼,
+         *  抵消灰度离散误差引起的过冲摆动 → 直线更稳不抖。
+         *  gz>0 表示车正在往某方向偏转, 就往反方向补差速把它按住。
+         *  掉线(gyro_ok=0)时此项为 0, 完全等价原逻辑。               */
+#if GYRO_ENABLE
+        if (gyro_ok && GYRO_DAMP_K > 0 && abs_err <= GYRO_DAMP_ERRLIM) {
+            int32_t damp = (int32_t)(GYRO_DAMP_SIGN * GYRO_DAMP_K * gyro_gz);
+            if (damp >  GYRO_DAMP_MAX) damp =  GYRO_DAMP_MAX;
+            if (damp < -GYRO_DAMP_MAX) damp = -GYRO_DAMP_MAX;
+            steer -= damp;
+        }
+#endif
+
         if (steer >  STEER_MAX) steer =  STEER_MAX;
         if (steer < -STEER_MAX) steer = -STEER_MAX;
 
@@ -291,6 +402,17 @@ int main(void)
 
     DL_TimerA_startCounter(PWM_DRIVE_INST);
     DL_GPIO_setPins(GRP_SLEEP_PORT, GRP_SLEEP_SLEEP_PIN);
+
+    /* ── 陀螺仪初始化 (可选增强, 失败/未接不影响循迹) ──────────────
+     *  UART_GYRO 的引脚/波特率/8N1 已由 SYSCFG_DL_init() 配好, 这里
+     *  只挂中断. 随后回读一次模块配置, 同步订阅掩码 (防非全订阅误判).
+     *  SyncConfig 期间 TIMER 控制环尚未启动, 独占 AS201_Poll, 无竞争.
+     *  未接陀螺时 SyncConfig 会在 500ms 内超时返回, gyro_ok 保持 0,
+     *  控制环全程走纯灰度分支, 行为与原工程一致。                    */
+#if GYRO_ENABLE
+    AS201_Init(&g_gyro, UART_GYRO_INST, UART_GYRO_INST_INT_IRQN);
+    AS201_SyncConfig(&g_gyro, 500, &g_millis);
+#endif
 
     NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
     DL_TimerG_startCounter(TIMER_0_INST);

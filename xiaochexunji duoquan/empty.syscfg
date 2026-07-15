@@ -18,6 +18,8 @@ const PWM1   = PWM.addInstance();
 const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
 const TIMER  = scripting.addModule("/ti/driverlib/TIMER", {}, false);
 const TIMER1 = TIMER.addInstance();
+const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
+const UART1  = UART.addInstance();
 
 /**
  * Write custom configuration values to the imported modules.
@@ -75,6 +77,16 @@ TIMER1.timerClkDiv                 = 1;
 TIMER1.timerPeriod                 = "0.5 ms";
 TIMER1.interrupts                  = ["ZERO"];
 TIMER1.peripheral.$assign          = "TIMG0";
+
+/* HLK-AS201 陀螺仪串口: 115200-8-N-1, 使能 RX 中断 */
+UART1.$name                            = "UART_GYRO";
+UART1.enabledInterrupts                = ["RX"];
+UART1.targetBaudRate                   = 115200;
+UART1.peripheral.$assign               = "UART1";
+UART1.peripheral.rxPin.$assign         = "PA9";
+UART1.peripheral.txPin.$assign         = "PA8";
+UART1.txPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric5";
+UART1.rxPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric6";
 
 /**
  * Pinmux solution for unlocked pins/peripherals. This ensures that minor changes to the automatic solver in a future

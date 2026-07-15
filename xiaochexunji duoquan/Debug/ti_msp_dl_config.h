@@ -117,6 +117,26 @@ extern "C" {
 
 
 
+/* Defines for UART_GYRO */
+#define UART_GYRO_INST                                                     UART1
+#define UART_GYRO_INST_FREQUENCY                                        32000000
+#define UART_GYRO_INST_IRQHandler                               UART1_IRQHandler
+#define UART_GYRO_INST_INT_IRQN                                   UART1_INT_IRQn
+#define GPIO_UART_GYRO_RX_PORT                                             GPIOA
+#define GPIO_UART_GYRO_TX_PORT                                             GPIOA
+#define GPIO_UART_GYRO_RX_PIN                                      DL_GPIO_PIN_9
+#define GPIO_UART_GYRO_TX_PIN                                      DL_GPIO_PIN_8
+#define GPIO_UART_GYRO_IOMUX_RX                                  (IOMUX_PINCM20)
+#define GPIO_UART_GYRO_IOMUX_TX                                  (IOMUX_PINCM19)
+#define GPIO_UART_GYRO_IOMUX_RX_FUNC                   IOMUX_PINCM20_PF_UART1_RX
+#define GPIO_UART_GYRO_IOMUX_TX_FUNC                   IOMUX_PINCM19_PF_UART1_TX
+#define UART_GYRO_BAUD_RATE                                             (115200)
+#define UART_GYRO_IBRD_32_MHZ_115200_BAUD                                   (17)
+#define UART_GYRO_FBRD_32_MHZ_115200_BAUD                                   (23)
+
+
+
+
 
 /* Port definition for Pin Group GRP_GRAY_OUT */
 #define GRP_GRAY_OUT_PORT                                                (GPIOA)
@@ -152,6 +172,7 @@ void SYSCFG_DL_GPIO_init(void);
 void SYSCFG_DL_SYSCTL_init(void);
 void SYSCFG_DL_PWM_DRIVE_init(void);
 void SYSCFG_DL_TIMER_0_init(void);
+void SYSCFG_DL_UART_GYRO_init(void);
 
 
 bool SYSCFG_DL_saveConfiguration(void);
