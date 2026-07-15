@@ -39,7 +39,7 @@ void SysTick_Handler(void)
 
 /* ── 速度 ── */
 #define SPEED_MAX         600    /* ★ 直道最高速                          */
-#define TURN_SPEED        180   /* ★ 急弯时整体速度 (+20%)               */
+#define TURN_SPEED        200   /* ★ 急弯时整体速度 (+20%)               */
 #define MOTOR_MAX        3200    /* PWM计数器上限 (=timerCount)            */
 
 /* ── 转向 ── */
@@ -223,10 +223,12 @@ void TIMER_0_INST_IRQHandler(void)
 
         if (pivot_state == 2) {
             /* 原地重转: 计时到了 且 中间传感器回中 才结束
-             * 防止计时到了但车还没对准新直道就切回循迹 */
+             * 防止计时到了但车还没对准新直道就切回循迹
+             * 硬超时2秒: 防止S3/S4永远等不到时原地打转    */
             uint8_t centered = (sensor[3] == ACTIVE_LEVEL) ||
                                (sensor[4] == ACTIVE_LEVEL);
-            if (now >= pivot_t_end && centered) {
+            if ((now >= pivot_t_end && centered) ||
+                (now >= pivot_t_end + 2000)) {   /* 硬超时兜底 */
                 pivot_state  = 0;
                 pivot_unlock = now + 1000;
             } else {
@@ -236,9 +238,14 @@ void TIMER_0_INST_IRQHandler(void)
             }
         }
 
-        /* state 0: 外侧触发 且 pivot冷却结束 → 直行推进 */
-        if (pivot_state == 0 && outer_now && now >= pivot_unlock) {
-            pivot_dir   = (sensor[7] == ACTIVE_LEVEL) ? 1 : -1; /* 右/左 */
+        /* state 0: 外侧触发 或 偏差过大(弯道PID啃不动了) → 启动pivot */
+        if (pivot_state == 0 && now >= pivot_unlock &&
+            (outer_now || abs_err >= 20)) {
+            if (outer_now) {
+                pivot_dir = (sensor[7] == ACTIVE_LEVEL) ? 1 : -1; /* 右/左 */
+            } else {
+                pivot_dir = (err > 0) ? 1 : -1;  /* 偏差方向决定转向 */
+            }
             pivot_state = 1;
             pivot_t_end = now + PIVOT_ADVANCE_MS;
             motor(PIVOT_ADV_SPEED, PIVOT_ADV_SPEED);
