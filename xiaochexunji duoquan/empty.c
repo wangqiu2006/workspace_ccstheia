@@ -51,10 +51,10 @@ void SysTick_Handler(void)
 #define PIVOT_ADVANCE_MS  800    /* ★ 检测到直角后先直行的时间(ms):        */
                                  /*   把后轮轴推到拐角顶点再转, 防切内道   */
                                  /*   传感器越靠前/车越长 → 调大           */
-#define PIVOT_ADV_SPEED   380    /* ★ 直行推进阶段的速度 (要够大才能克服静摩擦走起来) */
-#define PIVOT_CREEP        30    /* ★ 直角弯时前进分量 (越小越接近原地转) */
-#define PIVOT_STEER       350    /* ★ 直角弯时差速 (原地重转力度)         */
-#define PIVOT_TURN_MS     420    /* ★ 原地转持续时间(ms), 确保转过90°      */
+#define PIVOT_ADV_SPEED   420    /* ★ 直行推进阶段的速度 (要够大才能克服静摩擦走起来) */
+#define PIVOT_CREEP        45    /* ★ 直角弯时前进分量 (越小越接近原地转) */
+#define PIVOT_STEER       400    /* ★ 直角弯时差速 (原地重转力度)         */
+#define PIVOT_TURN_MS     450    /* ★ 原地转持续时间(ms), 确保转过90°      */
 
 /* ── 传感器 ── */
 #define ACTIVE_LEVEL        1    /* 1=检测到黑线输出高电平                */
