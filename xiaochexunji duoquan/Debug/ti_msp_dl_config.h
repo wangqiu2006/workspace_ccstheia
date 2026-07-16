@@ -178,6 +178,32 @@ extern "C" {
 /* Defines for AD2: GPIOA.26 with pinCMx 59 on package pin 30 */
 #define GRP_GRAY_AD2_PIN                                        (DL_GPIO_PIN_26)
 #define GRP_GRAY_AD2_IOMUX                                       (IOMUX_PINCM59)
+/* Defines for LEFT_A: GPIOA.29 with pinCMx 4 on package pin 36 */
+#define GRP_ENCODER_LEFT_A_PORT                                          (GPIOA)
+// pins affected by this interrupt request:["LEFT_A","LEFT_B"]
+#define GRP_ENCODER_GPIOA_INT_IRQN                              (GPIOA_INT_IRQn)
+#define GRP_ENCODER_GPIOA_INT_IIDX              (DL_INTERRUPT_GROUP1_IIDX_GPIOA)
+#define GRP_ENCODER_LEFT_A_IIDX                             (DL_GPIO_IIDX_DIO29)
+#define GRP_ENCODER_LEFT_A_PIN                                  (DL_GPIO_PIN_29)
+#define GRP_ENCODER_LEFT_A_IOMUX                                  (IOMUX_PINCM4)
+/* Defines for LEFT_B: GPIOA.30 with pinCMx 5 on package pin 37 */
+#define GRP_ENCODER_LEFT_B_PORT                                          (GPIOA)
+#define GRP_ENCODER_LEFT_B_IIDX                             (DL_GPIO_IIDX_DIO30)
+#define GRP_ENCODER_LEFT_B_PIN                                  (DL_GPIO_PIN_30)
+#define GRP_ENCODER_LEFT_B_IOMUX                                  (IOMUX_PINCM5)
+/* Defines for RIGHT_A: GPIOB.0 with pinCMx 12 on package pin 47 */
+#define GRP_ENCODER_RIGHT_A_PORT                                         (GPIOB)
+// pins affected by this interrupt request:["RIGHT_A","RIGHT_B"]
+#define GRP_ENCODER_GPIOB_INT_IRQN                              (GPIOB_INT_IRQn)
+#define GRP_ENCODER_GPIOB_INT_IIDX              (DL_INTERRUPT_GROUP1_IIDX_GPIOB)
+#define GRP_ENCODER_RIGHT_A_IIDX                             (DL_GPIO_IIDX_DIO0)
+#define GRP_ENCODER_RIGHT_A_PIN                                  (DL_GPIO_PIN_0)
+#define GRP_ENCODER_RIGHT_A_IOMUX                                (IOMUX_PINCM12)
+/* Defines for RIGHT_B: GPIOB.1 with pinCMx 13 on package pin 48 */
+#define GRP_ENCODER_RIGHT_B_PORT                                         (GPIOB)
+#define GRP_ENCODER_RIGHT_B_IIDX                             (DL_GPIO_IIDX_DIO1)
+#define GRP_ENCODER_RIGHT_B_PIN                                  (DL_GPIO_PIN_1)
+#define GRP_ENCODER_RIGHT_B_IOMUX                                (IOMUX_PINCM13)
 
 
 /* clang-format on */

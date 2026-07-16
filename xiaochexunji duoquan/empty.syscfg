@@ -13,6 +13,7 @@ const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const GPIO1  = GPIO.addInstance();
 const GPIO2  = GPIO.addInstance();
 const GPIO3  = GPIO.addInstance();
+const GPIO4  = GPIO.addInstance();
 const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const PWM1   = PWM.addInstance();
 const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
@@ -44,6 +45,30 @@ GPIO2.associatedPins[0].pin.$assign = "PA27";
 GPIO3.$name                         = "GRP_SLEEP";
 GPIO3.associatedPins[0].$name       = "SLEEP";
 GPIO3.associatedPins[0].pin.$assign = "PB16";
+
+/* MG513X-P28 左右轮 A/B 正交编码器: GPIO 双边沿中断, 软件 x4 译码 */
+GPIO4.$name = "GRP_ENCODER";
+GPIO4.associatedPins.create(4);
+GPIO4.associatedPins[0].$name       = "LEFT_A";
+GPIO4.associatedPins[0].direction   = "INPUT";
+GPIO4.associatedPins[0].interruptEn = true;
+GPIO4.associatedPins[0].polarity    = "RISE_FALL";
+GPIO4.associatedPins[0].pin.$assign = "PA29";
+GPIO4.associatedPins[1].$name       = "LEFT_B";
+GPIO4.associatedPins[1].direction   = "INPUT";
+GPIO4.associatedPins[1].interruptEn = true;
+GPIO4.associatedPins[1].polarity    = "RISE_FALL";
+GPIO4.associatedPins[1].pin.$assign = "PA30";
+GPIO4.associatedPins[2].$name       = "RIGHT_A";
+GPIO4.associatedPins[2].direction   = "INPUT";
+GPIO4.associatedPins[2].interruptEn = true;
+GPIO4.associatedPins[2].polarity    = "RISE_FALL";
+GPIO4.associatedPins[2].pin.$assign = "PB0";
+GPIO4.associatedPins[3].$name       = "RIGHT_B";
+GPIO4.associatedPins[3].direction   = "INPUT";
+GPIO4.associatedPins[3].interruptEn = true;
+GPIO4.associatedPins[3].polarity    = "RISE_FALL";
+GPIO4.associatedPins[3].pin.$assign = "PB1";
 
 PWM1.$name                              = "PWM_DRIVE";
 PWM1.timerCount                         = 3200;

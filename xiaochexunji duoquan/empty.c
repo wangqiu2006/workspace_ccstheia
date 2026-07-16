@@ -18,6 +18,7 @@
  *   右电机: CC3=PA12(正) CC1=PA7(反)   [TIMA0]
  *   SLEEP:  PB16
  *   灰度:   AD0=PA24 AD1=PA25 AD2=PA26 OUT=PA27
+ *   左编码器: A=PA29 B=PA30; 右编码器: A=PB0 B=PB1
  */
 
 #include "ti_msp_dl_config.h"
@@ -42,6 +43,20 @@ void SysTick_Handler(void)
 #define SPEED_MAX         600    /* ★ 直道最高速                          */
 #define TURN_SPEED        200   /* ★ 急弯时整体速度 (+20%)               */
 #define MOTOR_MAX        3200    /* PWM计数器上限 (=timerCount)            */
+
+/* ── 双轮编码器稳速 (MG513X-P28, A/B 双通道, GPIO 软件 x4 译码) ──
+ * 目标单位是每20ms的x4计数，不依赖轮径。先观察蓝牙 lc/rc 的 measured，
+ * 再把 ENCODER_COUNTS_AT_SPEED_MAX 调成空载现有速度，可保持加重前后速度。 */
+#define ENCODER_CLOSED_LOOP_ENABLE       1
+#define SPEED_LOOP_DIVIDER               5  /* 5×4ms = 20ms              */
+#define ENCODER_COUNTS_AT_SPEED_MAX     24  /* ★ SPEED_MAX时每20ms计数    */
+#define ENCODER_LEFT_SIGN              (+1) /* ★ 前进时计数须为正          */
+#define ENCODER_RIGHT_SIGN             (-1) /* ★ 若前进为负则对调A/B或改符号 */
+#define SPEED_PI_KP                     18  /* PWM/计数                    */
+#define SPEED_PI_KI                      2  /* PWM/计数/20ms               */
+#define SPEED_PI_I_MAX                 600  /* 积分项限幅                   */
+#define SPEED_PI_CORRECTION_MAX        900  /* 相对原PWM的最大补偿          */
+#define SPEED_WRONG_DIR_CONFIRM_TICKS    3  /* 60ms反向后退出闭环防失控     */
 
 /* ── 转向 ── */
 #define STEER_K            25    /* ★ 转向增益 (降低→直道不抖)            */
@@ -140,12 +155,41 @@ static uint32_t  pivot_turn_start_ms = 0;
 static uint8_t   turn_stall_ticks = 0;
 static uint8_t   sharp_err_ticks = 0;
 
+/* ── 双轮编码器与内环稳速 ── */
+typedef struct {
+    int32_t command;          /* 外环给出的原PWM尺度速度命令              */
+    int32_t target;           /* 每20ms目标x4计数                         */
+    int32_t measured;         /* 每20ms实测x4计数                         */
+    int32_t integral;         /* PI积分输出(PWM单位)                      */
+    int32_t pwm;              /* 实际下发PWM                              */
+    uint8_t wrong_dir_ticks;  /* 编码器方向错误连续计数                    */
+    uint8_t direction_fault;  /* 1=方向异常，已回退原PWM前馈               */
+} WheelSpeedControl;
+
+static WheelSpeedControl speed_left;
+static WheelSpeedControl speed_right;
+static volatile uint32_t encoder_left_count  = 0;
+static volatile uint32_t encoder_right_count = 0;
+static volatile uint32_t encoder_left_invalid  = 0;
+static volatile uint32_t encoder_right_invalid = 0;
+static volatile uint8_t encoder_left_state  = 0;
+static volatile uint8_t encoder_right_state = 0;
+static uint32_t encoder_left_last  = 0;
+static uint32_t encoder_right_last = 0;
+
 /* ── JDY-31 蓝牙调试输出 (每100ms一行, 不影响循迹) ── */
 static volatile uint8_t  dbg_ready  = 0;   /* 1=有新数据待发送            */
 static volatile float    dbg_gz     = 0.0f;
 static volatile float    dbg_yaw    = 0.0f;
 static volatile uint8_t  dbg_ok     = 0;
 static volatile float    dbg_turns  = 0.0f;
+static volatile int32_t  dbg_l_target = 0;
+static volatile int32_t  dbg_l_measured = 0;
+static volatile int32_t  dbg_l_pwm = 0;
+static volatile int32_t  dbg_r_target = 0;
+static volatile int32_t  dbg_r_measured = 0;
+static volatile int32_t  dbg_r_pwm = 0;
+static volatile uint8_t  dbg_encoder_fault = 0;
 
 /* ================================================================
  *  JDY-31 蓝牙串口帮助函数 (不用 printf, 避免引入重量级库)
@@ -248,14 +292,122 @@ static float yaw_delta_deg(float current, float previous)
 #endif
 
 /* ================================================================
- *  电机输出  (A4950: motor(0,0) = 制动)
+ *  双路正交编码器: 四个GPIO双边沿中断，x4状态表译码
  * ================================================================ */
-static void motor(int32_t l, int32_t r)
+static const int8_t quadrature_step[16] = {
+     0,  1, -1,  2,
+    -1,  0,  2,  1,
+     1,  2,  0, -1,
+     2, -1,  1,  0
+}; /* 2=非法跳变，通常表示干扰或ISR漏边沿 */
+
+static uint8_t encoder_read_left_state(void)
 {
-    if (l >  MOTOR_MAX) l =  MOTOR_MAX;
-    if (l < -MOTOR_MAX) l = -MOTOR_MAX;
-    if (r >  MOTOR_MAX) r =  MOTOR_MAX;
-    if (r < -MOTOR_MAX) r = -MOTOR_MAX;
+    uint32_t pins = DL_GPIO_readPins(GRP_ENCODER_LEFT_A_PORT,
+                                     GRP_ENCODER_LEFT_A_PIN |
+                                     GRP_ENCODER_LEFT_B_PIN);
+    return (uint8_t)(((pins & GRP_ENCODER_LEFT_A_PIN) ? 2U : 0U) |
+                     ((pins & GRP_ENCODER_LEFT_B_PIN) ? 1U : 0U));
+}
+
+static uint8_t encoder_read_right_state(void)
+{
+    uint32_t pins = DL_GPIO_readPins(GRP_ENCODER_RIGHT_A_PORT,
+                                     GRP_ENCODER_RIGHT_A_PIN |
+                                     GRP_ENCODER_RIGHT_B_PIN);
+    return (uint8_t)(((pins & GRP_ENCODER_RIGHT_A_PIN) ? 2U : 0U) |
+                     ((pins & GRP_ENCODER_RIGHT_B_PIN) ? 1U : 0U));
+}
+
+static void encoder_decode_left(void)
+{
+    uint8_t next = encoder_read_left_state();
+    int8_t step = quadrature_step[(encoder_left_state << 2) | next];
+    encoder_left_state = next;
+    if (step == 1) {
+        encoder_left_count++;
+    } else if (step == -1) {
+        encoder_left_count--;
+    } else if (step == 2) {
+        encoder_left_invalid++;
+    }
+}
+
+static void encoder_decode_right(void)
+{
+    uint8_t next = encoder_read_right_state();
+    int8_t step = quadrature_step[(encoder_right_state << 2) | next];
+    encoder_right_state = next;
+    if (step == 1) {
+        encoder_right_count++;
+    } else if (step == -1) {
+        encoder_right_count--;
+    } else if (step == 2) {
+        encoder_right_invalid++;
+    }
+}
+
+void GROUP1_IRQHandler(void)
+{
+    const uint32_t left_mask = GRP_ENCODER_LEFT_A_PIN |
+                               GRP_ENCODER_LEFT_B_PIN;
+    const uint32_t right_mask = GRP_ENCODER_RIGHT_A_PIN |
+                                GRP_ENCODER_RIGHT_B_PIN;
+
+    /* 清除后再采样；若处理期间又来新边沿，状态位保留并立即再循环。 */
+    for (uint8_t retry = 0; retry < 4; retry++) {
+        uint32_t pending_left = DL_GPIO_getEnabledInterruptStatus(
+            GRP_ENCODER_LEFT_A_PORT, left_mask);
+        uint32_t pending_right = DL_GPIO_getEnabledInterruptStatus(
+            GRP_ENCODER_RIGHT_A_PORT, right_mask);
+
+        if ((pending_left | pending_right) == 0U) break;
+        if (pending_left != 0U) {
+            DL_GPIO_clearInterruptStatus(GRP_ENCODER_LEFT_A_PORT,
+                                         pending_left & left_mask);
+            encoder_decode_left();
+        }
+        if (pending_right != 0U) {
+            DL_GPIO_clearInterruptStatus(GRP_ENCODER_RIGHT_A_PORT,
+                                         pending_right & right_mask);
+            encoder_decode_right();
+        }
+    }
+}
+
+static void encoder_init(void)
+{
+    const uint32_t left_mask = GRP_ENCODER_LEFT_A_PIN |
+                               GRP_ENCODER_LEFT_B_PIN;
+    const uint32_t right_mask = GRP_ENCODER_RIGHT_A_PIN |
+                                GRP_ENCODER_RIGHT_B_PIN;
+
+    encoder_left_state  = encoder_read_left_state();
+    encoder_right_state = encoder_read_right_state();
+    DL_GPIO_clearInterruptStatus(GRP_ENCODER_LEFT_A_PORT, left_mask);
+    DL_GPIO_clearInterruptStatus(GRP_ENCODER_RIGHT_A_PORT, right_mask);
+    NVIC_ClearPendingIRQ(GRP_ENCODER_GPIOA_INT_IRQN);
+    NVIC_ClearPendingIRQ(GRP_ENCODER_GPIOB_INT_IRQN);
+    NVIC_SetPriority(GRP_ENCODER_GPIOA_INT_IRQN, 0);
+    NVIC_SetPriority(GRP_ENCODER_GPIOB_INT_IRQN, 0);
+    NVIC_EnableIRQ(GRP_ENCODER_GPIOA_INT_IRQN);
+    NVIC_EnableIRQ(GRP_ENCODER_GPIOB_INT_IRQN);
+}
+
+/* ================================================================
+ *  电机PWM底层  (A4950: motor_pwm(0,0) = 制动)
+ * ================================================================ */
+static int32_t clamp_i32(int32_t value, int32_t low, int32_t high)
+{
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
+}
+
+static void motor_pwm(int32_t l, int32_t r)
+{
+    l = clamp_i32(l, -MOTOR_MAX, MOTOR_MAX);
+    r = clamp_i32(r, -MOTOR_MAX, MOTOR_MAX);
 
     if (l >= 0) {
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  l, DL_TIMER_CC_0_INDEX);
@@ -271,6 +423,124 @@ static void motor(int32_t l, int32_t r)
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  0, DL_TIMER_CC_1_INDEX);
         DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, -r, DL_TIMER_CC_3_INDEX);
     }
+}
+
+static int32_t speed_command_to_counts(int32_t command)
+{
+    int32_t magnitude = (command < 0) ? -command : command;
+    int32_t counts = (magnitude * ENCODER_COUNTS_AT_SPEED_MAX + SPEED_MAX / 2) /
+                     SPEED_MAX;
+    return (command < 0) ? -counts : counts;
+}
+
+static void speed_set_wheel_command(WheelSpeedControl *wheel, int32_t command)
+{
+    int32_t old_command = wheel->command;
+    command = clamp_i32(command, -MOTOR_MAX, MOTOR_MAX);
+
+    if (command == 0) {
+        wheel->command = 0;
+        wheel->target = 0;
+        wheel->integral = 0;
+        wheel->pwm = 0;
+        wheel->wrong_dir_ticks = 0;
+        wheel->direction_fault = 0;
+        return;
+    }
+
+    if (old_command == 0 || ((old_command < 0) != (command < 0))) {
+        wheel->integral = 0;
+        wheel->wrong_dir_ticks = 0;
+        wheel->direction_fault = 0;
+        wheel->pwm = command;
+    } else {
+        /* 外环命令变化立即体现在PWM上，同时保留当前PI补偿。 */
+        wheel->pwm = clamp_i32(wheel->pwm + command - old_command,
+                               -MOTOR_MAX, MOTOR_MAX);
+    }
+    wheel->command = command;
+    wheel->target = speed_command_to_counts(command);
+}
+
+/* 外环仍按原PWM尺度调用；底层将其解释为轮速目标并立即施加前馈。 */
+static void motor(int32_t l, int32_t r)
+{
+    speed_set_wheel_command(&speed_left, l);
+    speed_set_wheel_command(&speed_right, r);
+    motor_pwm(speed_left.pwm, speed_right.pwm);
+}
+
+static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured)
+{
+    wheel->measured = measured;
+    wheel->target = speed_command_to_counts(wheel->command);
+
+    if (wheel->command == 0 || wheel->target == 0) {
+        wheel->integral = 0;
+        wheel->pwm = wheel->command;
+        wheel->wrong_dir_ticks = 0;
+        return;
+    }
+
+    if (measured != 0 && ((measured < 0) != (wheel->target < 0))) {
+        if (wheel->wrong_dir_ticks < SPEED_WRONG_DIR_CONFIRM_TICKS) {
+            wheel->wrong_dir_ticks++;
+        }
+    } else {
+        wheel->wrong_dir_ticks = 0;
+    }
+
+    if (wheel->wrong_dir_ticks >= SPEED_WRONG_DIR_CONFIRM_TICKS) {
+        /* A/B顺序或方向符号错误时禁止PI继续加力，保留原开环行为。 */
+        wheel->direction_fault = 1;
+        wheel->integral = 0;
+        wheel->pwm = wheel->command;
+        return;
+    }
+
+#if ENCODER_CLOSED_LOOP_ENABLE
+    if (!wheel->direction_fault) {
+        int32_t error = wheel->target - measured;
+        int32_t integral_next = clamp_i32(
+            wheel->integral + SPEED_PI_KI * error,
+            -SPEED_PI_I_MAX, SPEED_PI_I_MAX);
+        int32_t proportional = SPEED_PI_KP * error;
+        int32_t correction_raw = proportional + integral_next;
+
+        /* 补偿饱和时冻结同方向积分，防止脱困后速度冲高。 */
+        if ((correction_raw > SPEED_PI_CORRECTION_MAX && error > 0) ||
+            (correction_raw < -SPEED_PI_CORRECTION_MAX && error < 0)) {
+            integral_next = wheel->integral;
+            correction_raw = proportional + integral_next;
+        }
+        wheel->integral = integral_next;
+        int32_t correction = clamp_i32(correction_raw,
+            -SPEED_PI_CORRECTION_MAX, SPEED_PI_CORRECTION_MAX);
+        wheel->pwm = clamp_i32(wheel->command + correction,
+                               -MOTOR_MAX, MOTOR_MAX);
+    }
+#else
+    wheel->integral = 0;
+    wheel->pwm = wheel->command;
+#endif
+}
+
+static void speed_control_tick(void)
+{
+    static uint8_t divider = 0;
+    if (++divider < SPEED_LOOP_DIVIDER) return;
+    divider = 0;
+
+    uint32_t left_now = encoder_left_count;
+    uint32_t right_now = encoder_right_count;
+    int32_t left_delta = (int32_t)(left_now - encoder_left_last);
+    int32_t right_delta = (int32_t)(right_now - encoder_right_last);
+    encoder_left_last = left_now;
+    encoder_right_last = right_now;
+
+    speed_update_wheel(&speed_left, left_delta * ENCODER_LEFT_SIGN);
+    speed_update_wheel(&speed_right, right_delta * ENCODER_RIGHT_SIGN);
+    motor_pwm(speed_left.pwm, speed_right.pwm);
 }
 
 /* ================================================================
@@ -339,6 +609,9 @@ void TIMER_0_INST_IRQHandler(void)
 
         uint32_t now = g_millis;
 
+        /* ── 每20ms读取双轮编码器并更新PI稳速 ── */
+        speed_control_tick();
+
         /* ── 陀螺仪解析/在线判定 (掉线自动退回纯灰度) ── */
         gyro_update(now);
 
@@ -346,12 +619,31 @@ void TIMER_0_INST_IRQHandler(void)
          *   只读不写控制变量, 不影响循迹和陀螺仪逻辑              */
         {
             static uint8_t dbg_div = 0;
+            static uint32_t dbg_l_invalid_last = 0;
+            static uint32_t dbg_r_invalid_last = 0;
             if (++dbg_div >= 25) {
                 dbg_div   = 0;
                 dbg_gz    = gyro_gz;
                 dbg_yaw   = gyro_ok ? gyro_yaw : 0.0f;
                 dbg_ok    = gyro_ok;
                 dbg_turns = turn_accum_deg;
+                dbg_l_target   = speed_left.target;
+                dbg_l_measured = speed_left.measured;
+                dbg_l_pwm      = speed_left.pwm;
+                dbg_r_target   = speed_right.target;
+                dbg_r_measured = speed_right.measured;
+                dbg_r_pwm      = speed_right.pwm;
+                dbg_encoder_fault =
+                    (speed_left.direction_fault ? 1U : 0U) |
+                    (speed_right.direction_fault ? 2U : 0U);
+                if (encoder_left_invalid != dbg_l_invalid_last) {
+                    dbg_encoder_fault |= 4U;
+                }
+                if (encoder_right_invalid != dbg_r_invalid_last) {
+                    dbg_encoder_fault |= 8U;
+                }
+                dbg_l_invalid_last = encoder_left_invalid;
+                dbg_r_invalid_last = encoder_right_invalid;
                 dbg_ready = 1;
             }
         }
@@ -615,6 +907,7 @@ int main(void)
 
     DL_TimerA_startCounter(PWM_DRIVE_INST);
     DL_GPIO_setPins(GRP_SLEEP_PORT, GRP_SLEEP_SLEEP_PIN);
+    encoder_init();
 
     /* ── 陀螺仪初始化 (可选增强, 失败/未接不影响循迹) ──────────────
      *  UART_GYRO 的引脚/波特率/8N1 已由 SYSCFG_DL_init() 配好, 这里
@@ -629,6 +922,8 @@ int main(void)
     }
 #endif
 
+    /* 编码器中断优先级0可抢占控制环，避免高转速时丢边沿。 */
+    NVIC_SetPriority(TIMER_0_INST_INT_IRQN, 1);
     NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
     DL_TimerG_startCounter(TIMER_0_INST);
 
@@ -637,13 +932,20 @@ int main(void)
 
         /* ── JDY-31 蓝牙调试输出 ─────────────────────────────────
          *   ISR 每 100ms 采样一次置 dbg_ready, 这里阻塞发送。
-         *   115200 波特率约 40 字符 ≈ 4ms, 发送期间 ISR 照常打断,
+         *   115200 波特率约 90 字符 ≈ 8ms, 发送期间 ISR 照常打断,
          *   循迹和陀螺仪逻辑完全不受影响。                        */
         uint8_t dbg_has_sample = 0;
         float dbg_gz_snapshot = 0.0f;
         float dbg_yaw_snapshot = 0.0f;
         uint8_t dbg_ok_snapshot = 0;
         float dbg_turns_snapshot = 0.0f;
+        int32_t dbg_l_target_snapshot = 0;
+        int32_t dbg_l_measured_snapshot = 0;
+        int32_t dbg_l_pwm_snapshot = 0;
+        int32_t dbg_r_target_snapshot = 0;
+        int32_t dbg_r_measured_snapshot = 0;
+        int32_t dbg_r_pwm_snapshot = 0;
+        uint8_t dbg_encoder_fault_snapshot = 0;
 
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
@@ -653,6 +955,13 @@ int main(void)
             dbg_yaw_snapshot = dbg_yaw;
             dbg_ok_snapshot = dbg_ok;
             dbg_turns_snapshot = dbg_turns;
+            dbg_l_target_snapshot = dbg_l_target;
+            dbg_l_measured_snapshot = dbg_l_measured;
+            dbg_l_pwm_snapshot = dbg_l_pwm;
+            dbg_r_target_snapshot = dbg_r_target;
+            dbg_r_measured_snapshot = dbg_r_measured;
+            dbg_r_pwm_snapshot = dbg_r_pwm;
+            dbg_encoder_fault_snapshot = dbg_encoder_fault;
             dbg_has_sample = 1;
         }
         if (primask == 0U) {
@@ -660,11 +969,18 @@ int main(void)
         }
 
         if (dbg_has_sample) {
-            /* 格式: gz:-12.5 yaw:24.9 ok:1 turns:47.3\r\n */
+            /* lc/rc=目标/实测/PWM；ef位0/1方向错，位2/3为左右非法跳变。 */
             bt_puts("gz:");    bt_putf1(dbg_gz_snapshot);
             bt_puts(" yaw:");  bt_putf1(dbg_yaw_snapshot);
             bt_puts(" ok:");   bt_putc((uint8_t)('0' + dbg_ok_snapshot));
             bt_puts(" turns:"); bt_putf1(dbg_turns_snapshot);
+            bt_puts(" lc:"); bt_puti(dbg_l_target_snapshot);
+            bt_putc('/');     bt_puti(dbg_l_measured_snapshot);
+            bt_putc('/');     bt_puti(dbg_l_pwm_snapshot);
+            bt_puts(" rc:"); bt_puti(dbg_r_target_snapshot);
+            bt_putc('/');     bt_puti(dbg_r_measured_snapshot);
+            bt_putc('/');     bt_puti(dbg_r_pwm_snapshot);
+            bt_puts(" ef:"); bt_puti(dbg_encoder_fault_snapshot);
             bt_puts("\r\n");
         }
     }
