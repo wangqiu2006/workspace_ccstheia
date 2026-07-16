@@ -23,7 +23,6 @@
 #include "ti_msp_dl_config.h"
 #include "hlk_as201.h"
 #include <stdint.h>
-#include <math.h>
 
 /* ================================================================
  *  SysTick — 1ms 自由运行计数器
@@ -55,8 +54,12 @@ void SysTick_Handler(void)
                                  /*   传感器越靠前/车越长 → 调大           */
 #define PIVOT_ADV_SPEED   420    /* ★ 直行推进阶段的速度 (要够大才能克服静摩擦走起来) */
 #define PIVOT_CREEP        45    /* ★ 直角弯时前进分量 (越小越接近原地转) */
-#define PIVOT_STEER       400    /* ★ 直角弯时差速 (原地重转力度)         */
+#define PIVOT_STEER       360    /* ★ 温和起转差速                         */
+#define PIVOT_STEER_MIN   300    /* 底盘实测所需的可靠最低转向差速         */
+#define PIVOT_STEER_BOOST 480    /* 坡道堵转确认后的临时增力               */
 #define PIVOT_TURN_MS     450    /* ★ 原地转持续时间(ms), 确保转过90°      */
+#define PIVOT_MAX_TURN_MS 700    /* 不依赖陀螺的绝对时限, 防止转到180°     */
+#define PIVOT_SLOPE_MAX_TURN_MS 1000 /* 确认低角速时允许的坡道转弯时限       */
 
 /* ── 传感器 ── */
 #define ACTIVE_LEVEL        1    /* 1=检测到黑线输出高电平                */
@@ -72,16 +75,31 @@ void SysTick_Handler(void)
  *   全部为"叠加增强": 陀螺仪没接/掉线时 gyro_ok=0, 下列逻辑自动跳过,
  *   行为完全退回原纯灰度循迹, 不影响现有效果。                          */
 #define GYRO_ENABLE          1     /* 0=编译期完全禁用陀螺仪辅助            */
+#define GYRO_REPORT_FLAGS   (AS201_SUB_GYRO | AS201_SUB_ANGLE)
+#define GYRO_FILTER_ALPHA    0.50f /* 20Hz角速度一阶低通系数; 越大响应越快   */
+#define GYRO_FRESH_MS         120  /* 控制只使用足够新的样本; 约2个上报周期  */
 #define GYRO_DAMP_K          6     /* ★ 直道阻尼增益: steer -= K*gz(°/s)   */
                                    /*   越大越"稳"但反应钝, 0=关直道阻尼    */
 #define GYRO_DAMP_SIGN     (+1)    /* ★ 阻尼符号: 若开阻尼后直道更抖, 改 -1 */
 #define GYRO_DAMP_ERRLIM     6     /* 仅 |err|<=此值(近直道)才施加阻尼,     */
                                    /*   避免干扰正常过弯                    */
 #define GYRO_DAMP_MAX      150     /* 阻尼项绝对上限, 防陀螺尖峰拉爆差速     */
+#define GYRO_DAMP_DEADBAND   1.0f  /* 零偏/静止噪声死区(°/s)               */
 #define TURN_TARGET_DEG    82.0f   /* ★ 转弯判定角度(°): 累计转过此角+回中→结束 */
                                    /*   略小于90°, 留出惯性余量; 抄近改小/转不够改大 */
-#define TURN_EASE_DEG      25.0f   /* 距目标角此度数内开始减速→转弯更平滑   */
+#define TURN_EASE_DEG      30.0f   /* 距目标角此度数内连续减速               */
+#define TURN_RATE_CRUISE   130.0f  /* 转弯前段目标角速度(°/s)               */
+#define TURN_RATE_END       70.0f  /* 接近目标角时的目标角速度(°/s)         */
+#define TURN_RATE_K          2.0f  /* 超速反馈增益: 每超1°/s减少的差速       */
+#define TURN_STALL_RATE     35.0f  /* 低于此角速度视为可能堵转(°/s)         */
+#define TURN_STALL_CONFIRM_TICKS 20 /* 连续20拍=80ms后才启用坡道增力          */
+#define TURN_MIN_EXIT_DEG  65.0f   /* 有陀螺时计时回中退出的最小可信转角    */
+#define TURN_MAX_DEG       92.0f   /* 漏检灰度时的转角硬上限, 防止转到180°  */
+#define TURN_REACQUIRE_MIN_MS 180  /* 起转后至少等待此时长才接受灰度回中    */
+#define TURN_CENTER_CONFIRM_TICKS 1 /* 角度门控后单拍回中即可退出             */
+#define TURN_YAW_DIR_MIN     0.5f  /* 首个有效yaw增量阈值, 用于自适应方向    */
 #define GYRO_LOST_MS       300     /* 超过此时间没有新帧→判掉线, 自动退回   */
+#define SHARP_ERR_CONFIRM_TICKS 5   /* 非外侧探头触发pivot需连续20ms确认      */
 
 /* ================================================================
  *  全局变量
@@ -109,9 +127,18 @@ static uint8_t   gyro_ok        = 0;    /* 1=陀螺仪在线且数据有效     
 static uint32_t  gyro_last_cnt  = 0;    /* 上次见到的有效帧计数(判掉线)    */
 static uint32_t  gyro_last_ms   = 0;    /* 上次收到新帧的时刻(ms)          */
 static float     gyro_gz        = 0.0f; /* 最新 Z 轴角速度 (°/s)           */
+static float     gyro_yaw       = 0.0f; /* 最新航向角 (°)                   */
+static uint8_t   gyro_filter_ready = 0;
 static float     turn_accum_deg = 0.0f; /* pivot 原地转阶段累计转过角度(°) */
-/* 控制环固定 4ms 一拍 (scan_ch 归零), 积分用此固定 dt, 无需时间戳 */
-#define CTRL_DT_S          0.004f
+static uint32_t  turn_last_frame = 0;
+static float     turn_last_yaw   = 0.0f;
+static int8_t    turn_yaw_sign   = 0;    /* 首个有效增量确定本次转弯正方向   */
+static uint8_t   turn_yaw_ready  = 0;
+static uint8_t   turn_center_hits = 0;
+static uint8_t   turn_line_departed = 0;
+static uint32_t  pivot_turn_start_ms = 0;
+static uint8_t   turn_stall_ticks = 0;
+static uint8_t   sharp_err_ticks = 0;
 
 /* ── JDY-31 蓝牙调试输出 (每100ms一行, 不影响循迹) ── */
 static volatile uint8_t  dbg_ready  = 0;   /* 1=有新数据待发送            */
@@ -190,8 +217,38 @@ static int8_t calc_err(void)
     return last_err;
 }
 
+#if GYRO_ENABLE
+static uint8_t line_is_visible(void)
+{
+    for (uint8_t i = 0; i < 8; i++) {
+        if (sensor[i] == ACTIVE_LEVEL) return 1;
+    }
+    return 0;
+}
+#endif
+
+static uint8_t gyro_is_fresh(uint32_t now)
+{
+#if GYRO_ENABLE
+    return gyro_ok && (uint32_t)(now - gyro_last_ms) <= GYRO_FRESH_MS;
+#else
+    (void)now;
+    return 0;
+#endif
+}
+
+#if GYRO_ENABLE
+static float yaw_delta_deg(float current, float previous)
+{
+    float delta = current - previous;
+    if (delta > 180.0f) delta -= 360.0f;
+    if (delta < -180.0f) delta += 360.0f;
+    return delta;
+}
+#endif
+
 /* ================================================================
- *  电机输出  (A4950: motor(0,0) = 低侧制动)
+ *  电机输出  (A4950: motor(0,0) = 制动)
  * ================================================================ */
 static void motor(int32_t l, int32_t r)
 {
@@ -235,11 +292,19 @@ static void gyro_update(uint32_t now)
 #if GYRO_ENABLE
     AS201_Poll(&g_gyro);
 
-    /* 有新数据帧: 刷新 gz 与在线时刻 */
+    /* 融合要求角速度和航向角来自同一有效帧。 */
     if (AS201_HasNewFrame(&g_gyro, &gyro_last_cnt)) {
         const AS201_Data *d = AS201_GetData(&g_gyro);
-        if (d != NULL && (d->update_flags & AS201_SUB_GYRO)) {
-            gyro_gz      = d->gyro.z;   /* °/s, 绕 Z 轴 (车体转向轴) */
+        const uint8_t required = GYRO_REPORT_FLAGS;
+        if (d != NULL && (d->update_flags & required) == required) {
+            float raw_gz = d->gyro.z;
+            if (!gyro_filter_ready) {
+                gyro_gz = raw_gz;
+                gyro_filter_ready = 1;
+            } else {
+                gyro_gz += GYRO_FILTER_ALPHA * (raw_gz - gyro_gz);
+            }
+            gyro_yaw     = d->angle.yaw;
             gyro_last_ms = now;
             gyro_ok      = 1;
         }
@@ -248,6 +313,7 @@ static void gyro_update(uint32_t now)
     if (gyro_ok && (uint32_t)(now - gyro_last_ms) > GYRO_LOST_MS) {
         gyro_ok  = 0;
         gyro_gz  = 0.0f;
+        gyro_filter_ready = 0;
     }
 #else
     (void)now;
@@ -283,7 +349,7 @@ void TIMER_0_INST_IRQHandler(void)
             if (++dbg_div >= 25) {
                 dbg_div   = 0;
                 dbg_gz    = gyro_gz;
-                dbg_yaw   = gyro_ok ? g_gyro.data.angle.yaw : 0.0f;
+                dbg_yaw   = gyro_ok ? gyro_yaw : 0.0f;
                 dbg_ok    = gyro_ok;
                 dbg_turns = turn_accum_deg;
                 dbg_ready = 1;
@@ -296,11 +362,7 @@ void TIMER_0_INST_IRQHandler(void)
         int8_t  err     = calc_err();
         int32_t abs_err = (err < 0) ? -err : err;
 
-        /* ── 圈数计数 ──────────────────────────────────────────────
-         *   X1(sensor[0]) 或 X8(sensor[7]) 触发 → 数一个弯
-         *   触发后锁定 CORNER_LOCK_MS(1s), 期间不再检测
-         *   pivot执行期间(state1/2)暂停计数, 防直行推进时重复触发
-         * ─────────────────────────────────────────────────────── */
+        /* 最后一弯完成后，回到直道再停车。计弯在 pivot 启动处完成。 */
         {
             uint8_t outer = (sensor[0] == ACTIVE_LEVEL) ||
                             (sensor[7] == ACTIVE_LEVEL);
@@ -309,18 +371,10 @@ void TIMER_0_INST_IRQHandler(void)
                 uint8_t on_straight = !outer &&
                                       ((sensor[3] == ACTIVE_LEVEL) ||
                                        (sensor[4] == ACTIVE_LEVEL));
-                if (now >= corner_unlock && on_straight) {
+                if (pivot_state == 0 && now >= corner_unlock && on_straight) {
                     car_stopped = 1;
                     motor(0, 0);
                     break;
-                }
-            } else if (pivot_state == 0 && now >= corner_unlock && now >= pivot_unlock && outer) {
-                /* pivot未激活 + 锁定期外 + 外侧触发 → 数一个弯 */
-                corner_count++;
-                corner_unlock = now + CORNER_LOCK_MS;
-
-                if (corner_count >= (uint16_t)TARGET_LAPS * CORNERS_PER_LAP) {
-                    finishing = 1;
                 }
             }
         }
@@ -341,7 +395,15 @@ void TIMER_0_INST_IRQHandler(void)
             if (now >= pivot_t_end) {
                 pivot_state = 2;
                 pivot_t_end = now + PIVOT_TURN_MS;  /* 原地转计时开始 */
+                pivot_turn_start_ms = now;
                 turn_accum_deg = 0.0f;              /* 复位转弯角度累计器 */
+                turn_last_frame = gyro_last_cnt;
+                turn_last_yaw   = gyro_yaw;
+                turn_yaw_sign   = 0;
+                turn_yaw_ready  = gyro_is_fresh(now);
+                turn_center_hits = 0;
+                turn_line_departed = 0;
+                turn_stall_ticks = 0;
             } else {
                 motor(PIVOT_ADV_SPEED, PIVOT_ADV_SPEED); /* 直行推进 */
                 break;
@@ -350,39 +412,107 @@ void TIMER_0_INST_IRQHandler(void)
 
         if (pivot_state == 2) {
             /* 原地重转结束条件:
-             *   基础(无陀螺/掉线): 原计时到 且 中间回中, 或硬超时2秒 —— 原逻辑不变
-             *   增强(陀螺在线): 累计转角接近 TURN_TARGET_DEG 时按角度平滑收尾,
-             *                   接近目标角前 TURN_EASE_DEG 内线性减小转速→不过冲、更平滑
-             * 两条件是"或"关系: 满足任一即结束, 陀螺只会让它更早更稳地收尾, 不会卡死 */
-            uint8_t centered = (sensor[3] == ACTIVE_LEVEL) ||
-                               (sensor[4] == ACTIVE_LEVEL);
+             *   增强: 用新yaw帧累计净转角并平滑减速; 达到目标且灰度回中
+             *         才允许提前结束, 避免只到角度但尚未找回赛道
+             *   兜底: 原计时回中与硬超时始终保留, 陀螺掉线不会卡死 */
+            uint8_t center_raw = (sensor[2] == ACTIVE_LEVEL) ||
+                                 (sensor[3] == ACTIVE_LEVEL) ||
+                                 (sensor[4] == ACTIVE_LEVEL) ||
+                                 (sensor[5] == ACTIVE_LEVEL);
+            if (!center_raw) {
+                turn_line_departed = 1;
+            }
 
-            int32_t turn_steer = PIVOT_STEER;   /* 默认全力(退回原行为) */
+            uint8_t reacquire_allowed = turn_line_departed &&
+                (uint32_t)(now - pivot_turn_start_ms) >= TURN_REACQUIRE_MIN_MS;
+            if (center_raw && reacquire_allowed) {
+                if (turn_center_hits < TURN_CENTER_CONFIRM_TICKS) {
+                    turn_center_hits++;
+                }
+            } else {
+                turn_center_hits = 0;
+            }
+            uint8_t centered = (turn_center_hits >= TURN_CENTER_CONFIRM_TICKS);
+            uint8_t timed_centered = (now >= pivot_t_end && centered);
+            uint32_t max_turn_ms = PIVOT_MAX_TURN_MS;
+
+            int32_t turn_steer = PIVOT_STEER;   /* 默认使用起转全力 */
 
 #if GYRO_ENABLE
-            if (gyro_ok) {
-                /* 4ms 定周期积分 gz(°/s) → 累计转过的角度(取绝对值, 与安装方向无关) */
-                float dps = gyro_gz;
-                float inc = dps * 0.004f;                 /* 4ms */
-                turn_accum_deg += (inc < 0.0f) ? -inc : inc;
+            uint8_t gyro_fresh = gyro_is_fresh(now);
+            uint8_t gyro_target_reached = 0;
+            uint8_t gyro_angle_limit = 0;
+            if (gyro_fresh) {
+                if (!turn_yaw_ready) {
+                    turn_last_frame = gyro_last_cnt;
+                    turn_last_yaw   = gyro_yaw;
+                    turn_yaw_sign   = 0;
+                    turn_yaw_ready  = 1;
+                } else if (gyro_last_cnt != turn_last_frame) {
+                    float delta = yaw_delta_deg(gyro_yaw, turn_last_yaw);
+                    turn_last_frame = gyro_last_cnt;
+                    turn_last_yaw   = gyro_yaw;
+
+                    float abs_delta = (delta < 0.0f) ? -delta : delta;
+                    if (turn_yaw_sign == 0 && abs_delta >= TURN_YAW_DIR_MIN) {
+                        turn_yaw_sign = (delta > 0.0f) ? 1 : -1;
+                    }
+                    if (turn_yaw_sign != 0) {
+                        turn_accum_deg += delta * (float)turn_yaw_sign;
+                        if (turn_accum_deg < 0.0f) turn_accum_deg = 0.0f;
+                    }
+                }
 
                 float remain = TURN_TARGET_DEG - turn_accum_deg;
-                if (remain <= 0.0f) {
-                    /* 已转够角度 → 立即结束, 不必等计时/回中, 一致性最好 */
-                    pivot_state  = 0;
-                    pivot_unlock = now + 1000;
-                    break;
-                }
+                gyro_target_reached = (remain <= 0.0f);
+                gyro_angle_limit = (turn_accum_deg >= TURN_MAX_DEG);
+
+                float target_rate = TURN_RATE_CRUISE;
                 if (remain < TURN_EASE_DEG) {
-                    /* 进入缓冲区: 转速随剩余角度线性降低, 最低留 30% 防转不动 */
-                    float ratio = remain / TURN_EASE_DEG;      /* 1→0 */
-                    if (ratio < 0.30f) ratio = 0.30f;
-                    turn_steer = (int32_t)(PIVOT_STEER * ratio);
+                    float ratio = remain / TURN_EASE_DEG;
+                    if (ratio < 0.0f) ratio = 0.0f;
+                    turn_steer = PIVOT_STEER_MIN +
+                                 (int32_t)((PIVOT_STEER - PIVOT_STEER_MIN) * ratio);
+                    target_rate = TURN_RATE_END +
+                                  (TURN_RATE_CRUISE - TURN_RATE_END) * ratio;
                 }
+
+                /* 角速度只做超速抑制: 起步慢时不额外加力，避免突然猛转。 */
+                float abs_rate = (gyro_gz < 0.0f) ? -gyro_gz : gyro_gz;
+                if (abs_rate > target_rate) {
+                    turn_steer -= (int32_t)((abs_rate - target_rate) * TURN_RATE_K);
+                }
+                if (turn_steer < PIVOT_STEER_MIN) {
+                    turn_steer = PIVOT_STEER_MIN;
+                }
+
+                if (remain > TURN_EASE_DEG && abs_rate < TURN_STALL_RATE) {
+                    if (turn_stall_ticks < TURN_STALL_CONFIRM_TICKS) {
+                        turn_stall_ticks++;
+                    }
+                } else {
+                    turn_stall_ticks = 0;
+                }
+                if (turn_stall_ticks >= TURN_STALL_CONFIRM_TICKS) {
+                    turn_steer = PIVOT_STEER_BOOST;
+                }
+
+                if (turn_yaw_sign != 0 &&
+                    turn_accum_deg < TURN_MIN_EXIT_DEG) {
+                    timed_centered = 0;
+                    max_turn_ms = PIVOT_SLOPE_MAX_TURN_MS;
+                }
+            } else {
+                turn_yaw_ready = 0;
             }
 #endif
-            if ((now >= pivot_t_end && centered) ||
-                (now >= pivot_t_end + 2000)) {   /* 硬超时兜底 */
+            if (
+#if GYRO_ENABLE
+                gyro_angle_limit ||
+                (gyro_target_reached && centered) ||
+#endif
+                timed_centered ||
+                ((uint32_t)(now - pivot_turn_start_ms) >= max_turn_ms)) {
                 pivot_state  = 0;
                 pivot_unlock = now + 1000;
             } else {
@@ -392,14 +522,33 @@ void TIMER_0_INST_IRQHandler(void)
             }
         }
 
-        /* state 0: 外侧触发 或 偏差过大(弯道PID啃不动了) → 启动pivot */
+        /* state 0: 外侧立即触发；大偏差需连续确认，避免坡面抖动误判。 */
         if (pivot_state == 0 && now >= pivot_unlock &&
-            (outer_now || abs_err >= 20)) {
+            now >= corner_unlock && abs_err >= 20) {
+            if (sharp_err_ticks < SHARP_ERR_CONFIRM_TICKS) sharp_err_ticks++;
+        } else if (pivot_state == 0) {
+            sharp_err_ticks = 0;
+        }
+        uint8_t sharp_err_confirmed = (sharp_err_ticks >= SHARP_ERR_CONFIRM_TICKS);
+
+        if (pivot_state == 0 && now >= pivot_unlock && now >= corner_unlock &&
+            (outer_now || sharp_err_confirmed)) {
             if (outer_now) {
                 pivot_dir = (sensor[7] == ACTIVE_LEVEL) ? 1 : -1; /* 右/左 */
             } else {
                 pivot_dir = (err > 0) ? 1 : -1;  /* 偏差方向决定转向 */
             }
+
+            /* 一次确认的 pivot 对应一个实际弯，避免采样时序造成漏计。 */
+            if (!finishing) {
+                corner_count++;
+                corner_unlock = now + CORNER_LOCK_MS;
+                if (corner_count >= (uint16_t)TARGET_LAPS * CORNERS_PER_LAP) {
+                    finishing = 1;
+                }
+            }
+
+            sharp_err_ticks = 0;
             pivot_state = 1;
             pivot_t_end = now + PIVOT_ADVANCE_MS;
             motor(PIVOT_ADV_SPEED, PIVOT_ADV_SPEED);
@@ -423,8 +572,14 @@ void TIMER_0_INST_IRQHandler(void)
          *  gz>0 表示车正在往某方向偏转, 就往反方向补差速把它按住。
          *  掉线(gyro_ok=0)时此项为 0, 完全等价原逻辑。               */
 #if GYRO_ENABLE
-        if (gyro_ok && GYRO_DAMP_K > 0 && abs_err <= GYRO_DAMP_ERRLIM) {
-            int32_t damp = (int32_t)(GYRO_DAMP_SIGN * GYRO_DAMP_K * gyro_gz);
+        if (gyro_is_fresh(now) && line_is_visible() && GYRO_DAMP_K > 0 &&
+            abs_err <= GYRO_DAMP_ERRLIM) {
+            float damp_dps = gyro_gz;
+            if (damp_dps > -GYRO_DAMP_DEADBAND &&
+                damp_dps < GYRO_DAMP_DEADBAND) {
+                damp_dps = 0.0f;
+            }
+            int32_t damp = (int32_t)(GYRO_DAMP_SIGN * GYRO_DAMP_K * damp_dps);
             if (damp >  GYRO_DAMP_MAX) damp =  GYRO_DAMP_MAX;
             if (damp < -GYRO_DAMP_MAX) damp = -GYRO_DAMP_MAX;
             steer -= damp;
@@ -463,13 +618,15 @@ int main(void)
 
     /* ── 陀螺仪初始化 (可选增强, 失败/未接不影响循迹) ──────────────
      *  UART_GYRO 的引脚/波特率/8N1 已由 SYSCFG_DL_init() 配好, 这里
-     *  只挂中断. 随后回读一次模块配置, 同步订阅掩码 (防非全订阅误判).
-     *  SyncConfig 期间 TIMER 控制环尚未启动, 独占 AS201_Poll, 无竞争.
-     *  未接陀螺时 SyncConfig 会在 500ms 内超时返回, gyro_ok 保持 0,
+     *  只挂中断. 随后按需配置 GYRO+ANGLE、20Hz 与主动上报并回读确认.
+     *  配置期间 TIMER 控制环尚未启动, 独占 AS201_Poll, 无竞争.
+     *  未接陀螺时配置会在 500ms 内超时返回, gyro_ok 保持 0,
      *  控制环全程走纯灰度分支, 行为与原工程一致。                    */
 #if GYRO_ENABLE
-    AS201_Init(&g_gyro, UART_GYRO_INST, UART_GYRO_INST_INT_IRQN);
-    AS201_SyncConfig(&g_gyro, 500, &g_millis);
+    if (AS201_Init(&g_gyro, UART_GYRO_INST, UART_GYRO_INST_INT_IRQN) == AS201_OK) {
+        AS201_EnsureReportConfig(&g_gyro, GYRO_REPORT_FLAGS,
+                                 AS201_RATE_20HZ, true, 500, &g_millis);
+    }
 #endif
 
     NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
@@ -480,15 +637,34 @@ int main(void)
 
         /* ── JDY-31 蓝牙调试输出 ─────────────────────────────────
          *   ISR 每 100ms 采样一次置 dbg_ready, 这里阻塞发送。
-         *   9600 波特率约 40 字符 ≈ 42ms, 发送期间 ISR 照常打断,
+         *   115200 波特率约 40 字符 ≈ 4ms, 发送期间 ISR 照常打断,
          *   循迹和陀螺仪逻辑完全不受影响。                        */
+        uint8_t dbg_has_sample = 0;
+        float dbg_gz_snapshot = 0.0f;
+        float dbg_yaw_snapshot = 0.0f;
+        uint8_t dbg_ok_snapshot = 0;
+        float dbg_turns_snapshot = 0.0f;
+
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
         if (dbg_ready) {
             dbg_ready = 0;
+            dbg_gz_snapshot = dbg_gz;
+            dbg_yaw_snapshot = dbg_yaw;
+            dbg_ok_snapshot = dbg_ok;
+            dbg_turns_snapshot = dbg_turns;
+            dbg_has_sample = 1;
+        }
+        if (primask == 0U) {
+            __enable_irq();
+        }
+
+        if (dbg_has_sample) {
             /* 格式: gz:-12.5 yaw:24.9 ok:1 turns:47.3\r\n */
-            bt_puts("gz:");    bt_putf1(dbg_gz);
-            bt_puts(" yaw:");  bt_putf1(dbg_yaw);
-            bt_puts(" ok:");   bt_putc((uint8_t)('0' + dbg_ok));
-            bt_puts(" turns:"); bt_putf1(dbg_turns);
+            bt_puts("gz:");    bt_putf1(dbg_gz_snapshot);
+            bt_puts(" yaw:");  bt_putf1(dbg_yaw_snapshot);
+            bt_puts(" ok:");   bt_putc((uint8_t)('0' + dbg_ok_snapshot));
+            bt_puts(" turns:"); bt_putf1(dbg_turns_snapshot);
             bt_puts("\r\n");
         }
     }

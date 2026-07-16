@@ -6,8 +6,8 @@
  * 严格依据《HLK-AS201系列姿态传感器模块说明书 V1.1》第 11 章通信协议实现。
  *
  * 硬件连接:
- *   AS201 UART_TX(引脚15) → MSPM0 UART RX (如 PA11)
- *   AS201 UART_RX(引脚16) → MSPM0 UART TX (如 PA10)
+ *   AS201 UART_TX(引脚15) → MSPM0 PA9  (UART1 RX)
+ *   AS201 UART_RX(引脚16) → MSPM0 PA8  (UART1 TX)
  *   AS201 VCC33           → 3.3V
  *   AS201 GND             → GND
  *
@@ -20,12 +20,11 @@
  *   - check : (cmd + data 各字节) 的累加和取低 8 位  ← 不含 head/tail/len
  */
 
-#ifndef __HLK_AS201_H__
-#define __HLK_AS201_H__
+#ifndef HLK_AS201_H
+#define HLK_AS201_H
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <string.h>
 #include <ti/devices/msp/msp.h>
 #include <ti/driverlib/driverlib.h>
 
@@ -141,6 +140,7 @@ typedef enum {
     AS201_ERR_CHECKSUM = -2,
     AS201_ERR_FRAME    = -3,
     AS201_ERR_PARAM    = -4,
+    AS201_ERR_CONFIG   = -5,
 } AS201_Status;
 
 typedef struct {
@@ -157,7 +157,7 @@ typedef struct {
     uint8_t           state;
     uint8_t           frame[AS201_FRAME_MAX];   /* 存 cmd..check */
     uint8_t           idx;                      /* 已收字节 */
-    uint8_t           need;                     /* 本帧 cmd..check+tail 剩余字节数 */
+    uint8_t           need;                     /* 本帧 cmd..check 字节数 */
 
     /* 订阅掩码: 决定数据上报帧中各字段是否存在及顺序. 默认全订阅 */
     uint8_t           subscription;
@@ -167,6 +167,7 @@ typedef struct {
     volatile uint32_t overflow_count;           /* 环形缓冲满而丢字节次数(ISR)*/
     uint32_t          len_mismatch_count;       /* 数据帧长度与订阅掩码不符次数*/
     uint32_t          checksum_err_count;       /* 帧校验和错误次数           */
+    uint32_t          frame_error_count;        /* 非法长度/类型/帧尾次数     */
 
     /* 0x19 获取配置 回包缓存 (订阅标识掉电保存, 上电须回读以免长度自检误判) */
     uint8_t           cfg_subscription;         /* 模块实际订阅标识           */
@@ -203,7 +204,7 @@ void AS201_ISR(AS201_Handle *h);
 
 /*---- 配置命令 (阻塞发送) ----*/
 
-/** @brief 设置订阅标识 (AS201_SUB_* 组合). 同步更新本地解析掩码 */
+/** @brief 设置订阅标识并乐观更新本地掩码；需确认时使用 EnsureReportConfig */
 AS201_Status AS201_SetSubscription(AS201_Handle *h, uint8_t flags);
 
 /** @brief 设置回传速率, rate 用 AS201_RATE_* */
@@ -249,6 +250,22 @@ AS201_Status AS201_SyncConfig(AS201_Handle *h,
                               uint32_t timeout_ms,
                               volatile uint32_t *tick_ms);
 
+/**
+ * @brief 按需设置并回读验证上报配置，配置已匹配时不会重复写入模块
+ * @param flags       AS201_SUB_* 组合
+ * @param rate_code   AS201_RATE_*
+ * @param report_on   是否主动上报
+ * @param timeout_ms  每次配置回读的最长等待时间
+ * @param tick_ms     调用方毫秒计数地址
+ * @return AS201_OK 配置已确认；AS201_ERR_CONFIG 回读值不一致
+ */
+AS201_Status AS201_EnsureReportConfig(AS201_Handle *h,
+                                      uint8_t flags,
+                                      uint8_t rate_code,
+                                      bool report_on,
+                                      uint32_t timeout_ms,
+                                      volatile uint32_t *tick_ms);
+
 /** @brief 通用命令发送: 组帧 head/len/cmd/data/check/tail 并阻塞发出 */
 AS201_Status AS201_SendCommand(AS201_Handle *h, uint8_t cmd,
                                const uint8_t *data, uint8_t dlen);
@@ -256,4 +273,4 @@ AS201_Status AS201_SendCommand(AS201_Handle *h, uint8_t cmd,
 #ifdef __cplusplus
 }
 #endif
-#endif /* __HLK_AS201_H__ */
+#endif /* HLK_AS201_H */

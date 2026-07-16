@@ -13,6 +13,7 @@
  */
 
 #include "hlk_as201.h"
+#include <string.h>
 
 /*===========================================================================
  * 小端解包
@@ -78,20 +79,26 @@ static uint8_t report_payload_len(uint8_t active)
 /*===========================================================================
  * 数据上报帧解析 (frame[] 布局: [0]=cmd(0x00) [1]=sensor_type [2..]=payload)
  *===========================================================================*/
-static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
+static bool parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
 {
     /* f[0]=0x00, f[1]=sensor_type, payload 从 f[2] 起 */
+    if (flen < 2) {
+        h->len_mismatch_count++;
+        return false;
+    }
+
     uint8_t st  = f[1];
     const uint8_t *p = &f[2];
     const uint8_t *end = f + flen;      /* flen = 1(cmd) + payload_len */
 
-    h->data.sensor_type  = st & 0x03;
-    h->data.mag_accuracy = (st >> 2) & 0x03;
-    h->data.update_flags = 0;
-
     /* 有效字段 = 订阅标识 ∩ 机型能力: 6/9 轴不含的字段绝不出现在帧里,
      * 否则会从缺失字段起整体错位 */
-    uint8_t sub = (uint8_t)(h->subscription & capability_mask(h->data.sensor_type));
+    uint8_t sensor_type = st & 0x03;
+    if (sensor_type > AS201_SENSOR_6AXIS) {
+        h->frame_error_count++;
+        return false;
+    }
+    uint8_t sub = (uint8_t)(h->subscription & capability_mask(sensor_type));
 
     /* 帧长自检: 期望 payload 长度须与实收一致, 不符说明订阅掩码与模块
      * 实际不同步 (或机型判断有误), 跳过本帧避免静默错位 */
@@ -99,12 +106,17 @@ static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
     uint8_t actual = (uint8_t)(end - p);
     if (expect != actual) {
         h->len_mismatch_count++;
-        return;
+        return false;
     }
+
+    /* 长度确认后再修改已发布数据，异常帧不能破坏上一帧的有效状态。 */
+    h->data.sensor_type  = sensor_type;
+    h->data.mag_accuracy = (st >> 2) & 0x03;
+    h->data.update_flags = 0;
 
     /* 逐字段按订阅顺序解析, 每步前检查剩余长度, 防越界 */
     if (sub & AS201_SUB_ACCEL) {
-        if (p + 6 > end) return;
+        if (p + 6 > end) return false;
         h->data.accel.x = rd_i16(p + 0) * AS201_K_ACCEL;
         h->data.accel.y = rd_i16(p + 2) * AS201_K_ACCEL;
         h->data.accel.z = rd_i16(p + 4) * AS201_K_ACCEL;
@@ -112,7 +124,7 @@ static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
         p += 6;
     }
     if (sub & AS201_SUB_GYRO) {
-        if (p + 6 > end) return;
+        if (p + 6 > end) return false;
         h->data.gyro.x = rd_i16(p + 0) * AS201_K_GYRO;
         h->data.gyro.y = rd_i16(p + 2) * AS201_K_GYRO;
         h->data.gyro.z = rd_i16(p + 4) * AS201_K_GYRO;
@@ -120,7 +132,7 @@ static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
         p += 6;
     }
     if (sub & AS201_SUB_ANGLE) {
-        if (p + 6 > end) return;
+        if (p + 6 > end) return false;
         h->data.angle.roll  = rd_i16(p + 0) * AS201_K_ANGLE;
         h->data.angle.pitch = rd_i16(p + 2) * AS201_K_ANGLE;
         h->data.angle.yaw   = rd_i16(p + 4) * AS201_K_ANGLE;
@@ -128,7 +140,7 @@ static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
         p += 6;
     }
     if (sub & AS201_SUB_MAG) {
-        if (p + 6 > end) return;
+        if (p + 6 > end) return false;
         h->data.mag.x = rd_i16(p + 0) * AS201_K_MAG;
         h->data.mag.y = rd_i16(p + 2) * AS201_K_MAG;
         h->data.mag.z = rd_i16(p + 4) * AS201_K_MAG;
@@ -136,7 +148,7 @@ static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
         p += 6;
     }
     if (sub & AS201_SUB_QUAT) {
-        if (p + 8 > end) return;
+        if (p + 8 > end) return false;
         h->data.quat.q0 = rd_i16(p + 0) * AS201_K_QUAT;
         h->data.quat.q1 = rd_i16(p + 2) * AS201_K_QUAT;
         h->data.quat.q2 = rd_i16(p + 4) * AS201_K_QUAT;
@@ -145,23 +157,24 @@ static void parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
         p += 8;
     }
     if (sub & AS201_SUB_TEMP) {
-        if (p + 2 > end) return;
+        if (p + 2 > end) return false;
         h->data.temperature = rd_i16(p) * AS201_K_TEMP;
         h->data.update_flags |= AS201_SUB_TEMP;
         p += 2;
     }
     if (sub & AS201_SUB_PRESSURE) {
-        if (p + 4 > end) return;
+        if (p + 4 > end) return false;
         h->data.pressure = rd_i32(p) * AS201_K_PRESSURE;
         h->data.update_flags |= AS201_SUB_PRESSURE;
         p += 4;
     }
     if (sub & AS201_SUB_HEIGHT) {
-        if (p + 4 > end) return;
+        if (p + 4 > end) return false;
         h->data.height = rd_i32(p) * AS201_K_HEIGHT;
         h->data.update_flags |= AS201_SUB_HEIGHT;
         p += 4;
     }
+    return true;
 }
 
 /** @brief 处理一个校验通过的完整帧 (frame[] = cmd..data, 不含 check/tail) */
@@ -173,14 +186,15 @@ static void handle_frame(AS201_Handle *h, uint8_t cmd, uint8_t payload_len)
     case AS201_CMD_GET_ONCE:            /* 0x1B 回包体同 0x00 */
         /* frame 内容: [0]=cmd [1]=sensor_type [2..] payload
          * 传给解析器的 end = frame + 1 + payload_len (payload_len 含 sensor_type) */
-        parse_data_report(h, h->frame, (uint8_t)(1 + payload_len));
-        h->frame_count++;
+        if (parse_data_report(h, h->frame, (uint8_t)(1 + payload_len))) {
+            h->frame_count++;
+        }
         break;
 
     case AS201_CMD_GET_CONFIG:          /* 0x19 回包: 订阅标识/速率/波特率/上报开关 */
         /* 说明书示例: FA FB 06 19 FF 01 06 00 xx FC FD
          * data = [订阅标识][回传速率][串口波特率][数据上报开关], 共 4 字节 */
-        if (payload_len >= 4) {
+        if (payload_len == 4) {
             h->cfg_subscription = h->frame[1];
             h->cfg_rate         = h->frame[2];
             h->cfg_baud         = h->frame[3];
@@ -188,6 +202,8 @@ static void handle_frame(AS201_Handle *h, uint8_t cmd, uint8_t payload_len)
             /* 关键: 用模块实际订阅同步本地解析掩码, 否则长度自检会误判 */
             h->subscription     = h->cfg_subscription;
             h->cfg_valid        = true;
+        } else {
+            h->frame_error_count++;
         }
         break;
 
@@ -229,7 +245,11 @@ static void fsm(AS201_Handle *h, uint8_t b)
 
     case S_LEN:
         /* len = cmd..check 的字节数, 至少 2 (cmd + check), 不超过缓冲 */
-        if (b < 2 || b > AS201_FRAME_MAX) { h->state = S_H0; break; }
+        if (b < 2 || b > AS201_FRAME_MAX) {
+            h->frame_error_count++;
+            h->state = (b == AS201_HEAD0) ? S_H1 : S_H0;
+            break;
+        }
         h->need = b;            /* 还需接收 need 个字节 (cmd..check) */
         h->idx  = 0;
         h->state = S_BODY;
@@ -244,6 +264,7 @@ static void fsm(AS201_Handle *h, uint8_t b)
         if (b == AS201_TAIL0) {
             h->state = S_T1;
         } else {
+            h->frame_error_count++;
             h->state = (b == AS201_HEAD0) ? S_H1 : S_H0;
         }
         break;
@@ -263,6 +284,7 @@ static void fsm(AS201_Handle *h, uint8_t b)
             }
             h->state = S_H0;
         } else {
+            h->frame_error_count++;
             /* 帧尾第二字节不符: 重同步. 若恰为 FA 则可能是下一帧起始,
              * 回到 S_H1 而非 S_H0, 少丢一帧 */
             h->state = (b == AS201_HEAD0) ? S_H1 : S_H0;
@@ -318,7 +340,9 @@ bool AS201_HasNewFrame(const AS201_Handle *h, uint32_t *last_count)
 AS201_Status AS201_SendCommand(AS201_Handle *h, uint8_t cmd,
                                const uint8_t *data, uint8_t dlen)
 {
-    if (h == NULL || h->uart == NULL) return AS201_ERR_PARAM;
+    if (h == NULL || h->uart == NULL || (dlen > 0 && data == NULL)) {
+        return AS201_ERR_PARAM;
+    }
     if (dlen > (AS201_FRAME_MAX - 2)) return AS201_ERR_PARAM;
 
     uint8_t body[AS201_FRAME_MAX];      /* cmd..check */
@@ -424,6 +448,51 @@ AS201_Status AS201_SyncConfig(AS201_Handle *h,
     return AS201_OK;
 }
 
+AS201_Status AS201_EnsureReportConfig(AS201_Handle *h,
+                                      uint8_t flags,
+                                      uint8_t rate_code,
+                                      bool report_on,
+                                      uint32_t timeout_ms,
+                                      volatile uint32_t *tick_ms)
+{
+    if (h == NULL || h->uart == NULL || tick_ms == NULL ||
+        rate_code < AS201_RATE_0P1HZ || rate_code > AS201_RATE_20HZ) {
+        return AS201_ERR_PARAM;
+    }
+
+    AS201_Status s = AS201_SyncConfig(h, timeout_ms, tick_ms);
+    if (s != AS201_OK) return s;
+
+    bool changed = false;
+    uint8_t expected_report = report_on ? 1U : 0U;
+    if (h->cfg_subscription != flags) {
+        s = AS201_SetSubscription(h, flags);
+        if (s != AS201_OK) return s;
+        changed = true;
+    }
+    if (h->cfg_rate != rate_code) {
+        s = AS201_SetRate(h, rate_code);
+        if (s != AS201_OK) return s;
+        changed = true;
+    }
+    if (h->cfg_report_on != expected_report) {
+        s = AS201_SetReportEnable(h, report_on);
+        if (s != AS201_OK) return s;
+        changed = true;
+    }
+
+    if (changed) {
+        s = AS201_SyncConfig(h, timeout_ms, tick_ms);
+        if (s != AS201_OK) return s;
+    }
+
+    if (h->cfg_subscription != flags || h->cfg_rate != rate_code ||
+        h->cfg_report_on != expected_report) {
+        return AS201_ERR_CONFIG;
+    }
+    return AS201_OK;
+}
+
 /*===========================================================================
  * 中断服务
  *===========================================================================*/
@@ -443,7 +512,7 @@ void AS201_ISR(AS201_Handle *h)
              * 的 tail 自增产生数据竞争, 破坏无锁前提. 溢出计数便于现场排查. */
             if (next == h->rx_tail) {
                 h->overflow_count++;
-                break;      /* 缓冲已满, 停止读取, 剩余留在 FIFO/下次中断 */
+                continue;   /* 丢弃新字节并排空 FIFO，避免 RX 中断持续重入 */
             }
             h->rx_buf[h->rx_head] = d;
             h->rx_head = next;

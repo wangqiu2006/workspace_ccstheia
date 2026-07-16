@@ -89,7 +89,7 @@ UART1.peripheral.txPin.$assign         = "PA8";
 UART1.txPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric5";
 UART1.rxPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric6";
 
-/* JDY-31 蓝牙串口调试: 9600-8-N-1, 仅 TX 发送, 无需 RX 中断 */
+/* JDY-31 蓝牙串口调试: 115200-8-N-1, 仅 TX 发送, 无需 RX 中断 */
 UART2.$name                            = "UART_BT";
 UART2.targetBaudRate                   = 115200;
 UART2.peripheral.$assign               = "UART0";
