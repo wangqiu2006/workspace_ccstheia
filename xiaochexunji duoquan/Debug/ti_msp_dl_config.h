@@ -133,6 +133,22 @@ extern "C" {
 #define UART_GYRO_BAUD_RATE                                             (115200)
 #define UART_GYRO_IBRD_32_MHZ_115200_BAUD                                   (17)
 #define UART_GYRO_FBRD_32_MHZ_115200_BAUD                                   (23)
+/* Defines for UART_BT */
+#define UART_BT_INST                                                       UART0
+#define UART_BT_INST_FREQUENCY                                          32000000
+#define UART_BT_INST_IRQHandler                                 UART0_IRQHandler
+#define UART_BT_INST_INT_IRQN                                     UART0_INT_IRQn
+#define GPIO_UART_BT_RX_PORT                                               GPIOA
+#define GPIO_UART_BT_TX_PORT                                               GPIOA
+#define GPIO_UART_BT_RX_PIN                                       DL_GPIO_PIN_11
+#define GPIO_UART_BT_TX_PIN                                       DL_GPIO_PIN_10
+#define GPIO_UART_BT_IOMUX_RX                                    (IOMUX_PINCM22)
+#define GPIO_UART_BT_IOMUX_TX                                    (IOMUX_PINCM21)
+#define GPIO_UART_BT_IOMUX_RX_FUNC                     IOMUX_PINCM22_PF_UART0_RX
+#define GPIO_UART_BT_IOMUX_TX_FUNC                     IOMUX_PINCM21_PF_UART0_TX
+#define UART_BT_BAUD_RATE                                               (115200)
+#define UART_BT_IBRD_32_MHZ_115200_BAUD                                     (17)
+#define UART_BT_FBRD_32_MHZ_115200_BAUD                                     (23)
 
 
 
@@ -173,6 +189,7 @@ void SYSCFG_DL_SYSCTL_init(void);
 void SYSCFG_DL_PWM_DRIVE_init(void);
 void SYSCFG_DL_TIMER_0_init(void);
 void SYSCFG_DL_UART_GYRO_init(void);
+void SYSCFG_DL_UART_BT_init(void);
 
 
 bool SYSCFG_DL_saveConfiguration(void);

@@ -55,6 +55,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     SYSCFG_DL_PWM_DRIVE_init();
     SYSCFG_DL_TIMER_0_init();
     SYSCFG_DL_UART_GYRO_init();
+    SYSCFG_DL_UART_BT_init();
     /* Ensure backup structures have no valid state */
 	gPWM_DRIVEBackup.backupRdy 	= false;
 
@@ -91,12 +92,14 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_TimerA_reset(PWM_DRIVE_INST);
     DL_TimerG_reset(TIMER_0_INST);
     DL_UART_Main_reset(UART_GYRO_INST);
+    DL_UART_Main_reset(UART_BT_INST);
 
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
     DL_TimerA_enablePower(PWM_DRIVE_INST);
     DL_TimerG_enablePower(TIMER_0_INST);
     DL_UART_Main_enablePower(UART_GYRO_INST);
+    DL_UART_Main_enablePower(UART_BT_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
 
@@ -116,6 +119,10 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
         GPIO_UART_GYRO_IOMUX_TX, GPIO_UART_GYRO_IOMUX_TX_FUNC);
     DL_GPIO_initPeripheralInputFunction(
         GPIO_UART_GYRO_IOMUX_RX, GPIO_UART_GYRO_IOMUX_RX_FUNC);
+    DL_GPIO_initPeripheralOutputFunction(
+        GPIO_UART_BT_IOMUX_TX, GPIO_UART_BT_IOMUX_TX_FUNC);
+    DL_GPIO_initPeripheralInputFunction(
+        GPIO_UART_BT_IOMUX_RX, GPIO_UART_BT_IOMUX_RX_FUNC);
 
     DL_GPIO_initDigitalInputFeatures(GRP_GRAY_OUT_OUT_IOMUX,
 		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_NONE,
@@ -297,5 +304,36 @@ SYSCONFIG_WEAK void SYSCFG_DL_UART_GYRO_init(void)
 
 
     DL_UART_Main_enable(UART_GYRO_INST);
+}
+static const DL_UART_Main_ClockConfig gUART_BTClockConfig = {
+    .clockSel    = DL_UART_MAIN_CLOCK_BUSCLK,
+    .divideRatio = DL_UART_MAIN_CLOCK_DIVIDE_RATIO_1
+};
+
+static const DL_UART_Main_Config gUART_BTConfig = {
+    .mode        = DL_UART_MAIN_MODE_NORMAL,
+    .direction   = DL_UART_MAIN_DIRECTION_TX_RX,
+    .flowControl = DL_UART_MAIN_FLOW_CONTROL_NONE,
+    .parity      = DL_UART_MAIN_PARITY_NONE,
+    .wordLength  = DL_UART_MAIN_WORD_LENGTH_8_BITS,
+    .stopBits    = DL_UART_MAIN_STOP_BITS_ONE
+};
+
+SYSCONFIG_WEAK void SYSCFG_DL_UART_BT_init(void)
+{
+    DL_UART_Main_setClockConfig(UART_BT_INST, (DL_UART_Main_ClockConfig *) &gUART_BTClockConfig);
+
+    DL_UART_Main_init(UART_BT_INST, (DL_UART_Main_Config *) &gUART_BTConfig);
+    /*
+     * Configure baud rate by setting oversampling and baud rate divisors.
+     *  Target baud rate: 115200
+     *  Actual baud rate: 115211.52
+     */
+    DL_UART_Main_setOversampling(UART_BT_INST, DL_UART_OVERSAMPLING_RATE_16X);
+    DL_UART_Main_setBaudRateDivisor(UART_BT_INST, UART_BT_IBRD_32_MHZ_115200_BAUD, UART_BT_FBRD_32_MHZ_115200_BAUD);
+
+
+
+    DL_UART_Main_enable(UART_BT_INST);
 }
 
