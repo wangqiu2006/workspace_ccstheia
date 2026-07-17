@@ -60,6 +60,7 @@ void SysTick_Handler(void)
 #define SPEED_PI_I_MAX                 600  /* 积分项限幅                   */
 #define SPEED_PI_CORRECTION_MAX        900  /* 相对原PWM的最大补偿          */
 #define SPEED_WRONG_DIR_CONFIRM_TICKS    3  /* 60ms反向后退出闭环防失控     */
+<<<<<<< HEAD
 #define SPEED_REVERSE_GRACE_TICKS        8  /* 换向后最多160ms等待惯性消退  */
 #define SPEED_REVERSE_READY_TICKS        2  /* 连续40ms方向正确即可提前闭环 */
 #define SPEED_FEEDBACK_ARM_TICKS          3  /* 连续60ms可信后才首次闭环     */
@@ -78,6 +79,12 @@ void SysTick_Handler(void)
 #define SPEED_STARTUP_ASSIST_MAX        250  /* 未确认编码器时绝不超过此助力  */
 #define SPEED_PIVOT_CORRECTION_MAX      120  /* 原地转只允许小幅轮速修正      */
 #define SPEED_CORRECTION_SLEW_PER_TICK  120  /* 每20ms补偿变化上限            */
+=======
+#define SPEED_REVERSE_GRACE_TICKS        8  /* 换向后160ms只用开环等待惯性消退 */
+#define SPEED_NO_PULSE_CONFIRM_TICKS    10  /* 200ms无脉冲视为反馈失效       */
+#define SPEED_INVALID_CONFIRM_TICKS      3  /* 连续60ms非法跳变视为反馈失效  */
+#define SPEED_FAULT_RECOVER_TICKS        5  /* 连续100ms正确反馈后自动恢复   */
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
 
 /* ── 转向 ── */
 #define STEER_K            25    /* ★ 转向增益 (降低→直道不抖)            */
@@ -209,10 +216,17 @@ typedef struct {
     int32_t pwm;              /* 实际下发PWM                              */
     uint8_t wrong_dir_ticks;  /* 编码器方向错误连续计数                    */
     uint8_t reverse_grace_ticks; /* 换向后的开环宽限期                     */
+<<<<<<< HEAD
     uint8_t no_pulse_ticks;   /* 有可信速度目标但无脉冲的连续计数          */
     uint8_t invalid_ticks;    /* 异常反馈窗口连续计数                      */
     uint8_t good_feedback_ticks; /* 故障恢复/换向确认计数                  */
     uint8_t feedback_seen;    /* 当前方向已收到过可信反馈                  */
+=======
+    uint8_t no_pulse_ticks;   /* 有速度目标但无脉冲的连续计数              */
+    uint8_t invalid_ticks;    /* 非法正交跳变连续计数                      */
+    uint8_t good_feedback_ticks; /* 故障后的正确反馈连续计数               */
+    uint8_t feedback_seen;    /* 1=当前方向已收到过可信反馈                */
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
     uint8_t direction_fault;  /* 1=方向异常，已回退原PWM前馈               */
     uint8_t signal_fault;     /* 1=无脉冲/非法跳变，已回退原PWM前馈        */
 } WheelSpeedControl;
@@ -630,7 +644,11 @@ static void motor(int32_t l, int32_t r)
 }
 
 static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
+<<<<<<< HEAD
                                uint32_t invalid_delta, uint32_t elapsed_ms)
+=======
+                               uint32_t invalid_delta)
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
 {
     wheel->measured = measured;
     wheel->target = speed_command_to_counts(wheel->command);
@@ -639,15 +657,19 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
         wheel->integral = 0;
         wheel->pwm = wheel->command;
         wheel->wrong_dir_ticks = 0;
+<<<<<<< HEAD
         if (wheel->reverse_grace_ticks > 0) {
             wheel->reverse_grace_ticks--;
         }
+=======
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
         wheel->no_pulse_ticks = 0;
         wheel->invalid_ticks = 0;
         wheel->good_feedback_ticks = 0;
         return;
     }
 
+<<<<<<< HEAD
     int32_t abs_target = (wheel->target < 0) ? -wheel->target : wheel->target;
     int32_t abs_measured = (measured < 0) ? -measured : measured;
     uint8_t no_pulse_limit = (pivot_state == 2) ?
@@ -680,6 +702,14 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
     }
 
     /* H桥换向时先开环等待；新方向连续可信后可早于160ms恢复闭环。 */
+=======
+    uint8_t wrong_direction = measured != 0 &&
+        ((measured < 0) != (wheel->target < 0));
+    uint8_t clean_feedback = measured != 0 && !wrong_direction &&
+        invalid_delta == 0U;
+
+    /* H桥换向后编码器会短暂保留旧方向脉冲；宽限期内只用原PWM前馈。 */
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
     if (wheel->reverse_grace_ticks > 0) {
         wheel->reverse_grace_ticks--;
         wheel->integral = 0;
@@ -687,6 +717,7 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
         wheel->wrong_dir_ticks = 0;
         wheel->no_pulse_ticks = 0;
         wheel->invalid_ticks = 0;
+<<<<<<< HEAD
         if (clean_feedback) {
             if (wheel->good_feedback_ticks < SPEED_REVERSE_READY_TICKS) {
                 wheel->good_feedback_ticks++;
@@ -723,6 +754,12 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
         return;
     }
     wheel->invalid_ticks = 0;
+=======
+        wheel->good_feedback_ticks = 0;
+        if (clean_feedback) wheel->feedback_seen = 1;
+        return;
+    }
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
 
     if (wrong_direction) {
         if (wheel->wrong_dir_ticks < SPEED_WRONG_DIR_CONFIRM_TICKS) {
@@ -742,9 +779,26 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
         wheel->no_pulse_ticks--;
     }
 
+    if (measured == 0) {
+        if (wheel->no_pulse_ticks < SPEED_NO_PULSE_CONFIRM_TICKS) {
+            wheel->no_pulse_ticks++;
+        }
+    } else {
+        wheel->no_pulse_ticks = 0;
+    }
+
+    if (invalid_delta != 0U) {
+        if (wheel->invalid_ticks < SPEED_INVALID_CONFIRM_TICKS) {
+            wheel->invalid_ticks++;
+        }
+    } else {
+        wheel->invalid_ticks = 0;
+    }
+
     if (wheel->wrong_dir_ticks >= SPEED_WRONG_DIR_CONFIRM_TICKS) {
         wheel->direction_fault = 1;
     }
+<<<<<<< HEAD
     if (wrong_direction) {
         wheel->good_feedback_ticks = 0;
         wheel->integral = 0;
@@ -758,6 +812,15 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
     if (wheel->no_pulse_ticks >= no_pulse_limit) {
         wheel->signal_fault = 1;
     }
+=======
+    if (wheel->no_pulse_ticks >= SPEED_NO_PULSE_CONFIRM_TICKS ||
+        wheel->invalid_ticks >= SPEED_INVALID_CONFIRM_TICKS) {
+        wheel->signal_fault = 1;
+    }
+
+    if (clean_feedback) wheel->feedback_seen = 1;
+
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
     if (wheel->direction_fault || wheel->signal_fault) {
         if (clean_feedback) {
             if (wheel->good_feedback_ticks < SPEED_FAULT_RECOVER_TICKS) {
@@ -767,7 +830,28 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
             wheel->good_feedback_ticks = 0;
         }
 
+<<<<<<< HEAD
         /* 故障期间保持原开环；连续可信反馈后从零积分平滑恢复。 */
+=======
+        /* 故障期间保持原开环行为；可信反馈稳定后再从零积分恢复。 */
+        wheel->integral = 0;
+        wheel->pwm = wheel->command;
+        if (wheel->good_feedback_ticks >= SPEED_FAULT_RECOVER_TICKS) {
+            wheel->direction_fault = 0;
+            wheel->signal_fault = 0;
+            wheel->wrong_dir_ticks = 0;
+            wheel->no_pulse_ticks = 0;
+            wheel->invalid_ticks = 0;
+            wheel->good_feedback_ticks = 0;
+        }
+        return;
+    }
+
+    wheel->good_feedback_ticks = 0;
+
+    /* 未验证编码器前不得用“零反馈”放大PWM。 */
+    if (!wheel->feedback_seen) {
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
         wheel->integral = 0;
         wheel->pwm = wheel->command;
         if (wheel->good_feedback_ticks >= SPEED_FAULT_RECOVER_TICKS) {
@@ -937,6 +1021,7 @@ static void speed_control_tick(uint32_t now)
     encoder_left_invalid_control_last = left_invalid_now;
     encoder_right_invalid_control_last = right_invalid_now;
 
+<<<<<<< HEAD
     uint8_t pivot_mode = (pivot_state == 2);
     if (pivot_mode != last_pivot_mode) {
         speed_left.integral = 0;
@@ -970,6 +1055,12 @@ static void speed_control_tick(uint32_t now)
                        left_invalid_delta, elapsed_ms);
     speed_update_wheel(&speed_right, right_delta * ENCODER_RIGHT_SIGN,
                        right_invalid_delta, elapsed_ms);
+=======
+    speed_update_wheel(&speed_left, left_delta * ENCODER_LEFT_SIGN,
+                       left_invalid_delta);
+    speed_update_wheel(&speed_right, right_delta * ENCODER_RIGHT_SIGN,
+                       right_invalid_delta);
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
     motor_pwm(speed_left.pwm, speed_right.pwm);
 }
 
@@ -1069,6 +1160,7 @@ void TIMER_0_INST_IRQHandler(void)
                 dbg_encoder_fault =
                     (speed_left.direction_fault ? 1U : 0U) |
                     (speed_right.direction_fault ? 2U : 0U) |
+<<<<<<< HEAD
                     (speed_left.signal_fault ? 16U : 0U) |
                     (speed_right.signal_fault ? 32U : 0U);
                 if (dbg_l_invalid_snapshot != dbg_l_invalid_last) {
@@ -1076,6 +1168,15 @@ void TIMER_0_INST_IRQHandler(void)
                 }
                 if (dbg_r_invalid_snapshot != dbg_r_invalid_last) {
                     dbg_encoder_fault |= 8U;
+=======
+                    (speed_left.signal_fault ? 4U : 0U) |
+                    (speed_right.signal_fault ? 8U : 0U);
+                if (dbg_l_invalid_snapshot != dbg_l_invalid_last) {
+                    dbg_encoder_fault |= 16U;
+                }
+                if (dbg_r_invalid_snapshot != dbg_r_invalid_last) {
+                    dbg_encoder_fault |= 32U;
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
                 }
                 dbg_l_invalid_last = dbg_l_invalid_snapshot;
                 dbg_r_invalid_last = dbg_r_invalid_snapshot;
@@ -1531,7 +1632,11 @@ int main(void)
         }
 
         if (dbg_has_sample) {
+<<<<<<< HEAD
             /* ef位0/1方向错，2/3非法跳变，4/5为左右反馈信号故障。 */
+=======
+            /* lc/rc=目标/实测/PWM；ef位0/1方向错，2/3反馈错，4/5非法跳变。 */
+>>>>>>> c98210811f85c118bf0c6cc6ffba2322d3778ec8
             bt_puts("gz:");    bt_putf1(dbg_gz_snapshot);
             bt_puts(" yaw:");  bt_putf1(dbg_yaw_snapshot);
             bt_puts(" ok:");   bt_putc((uint8_t)('0' + dbg_ok_snapshot));
