@@ -8,17 +8,17 @@
  *   仍是闭环: 线回中自动停, 不依赖计时
  *
  * 圈数计数:
- *   X1(sensor[0]) 或 X8(sensor[7]) 触发 → 数一个弯
- *   触发后 CORNER_LOCK_MS(1秒) 内不再检测 → 防重复
+ *   X1(sensor[0]) / X8(sensor[7]) 或持续大偏差触发 → 挂起一个弯
+ *   pivot 确认完成后才计数；回到稳定中线后重新允许下一弯
  *   正方形一圈 4 个弯, TARGET_LAPS 圈 = TARGET_LAPS×4 个弯
  *   最后一个弯数到后继续跑完转弯, 回到直道停车
  *
  * 引脚:
- *   左电机: CC2=PA15(正) CC0=PB14(反)  [TIMA0]
- *   右电机: CC3=PA12(正) CC1=PA7(反)   [TIMA0]
- *   SLEEP:  PB16
- *   灰度:   AD0=PA24 AD1=PA25 AD2=PA26 OUT=PA27
- *   左编码器: A=PA29 B=PA30; 右编码器: A=PB0 B=PB1
+ *   AT8236 A桥/左轮: PWM4=PA11(正), PWM3=PA10(反) [TIMA1 CC1/CC0]
+ *   AT8236 B桥/右轮: PWM2=PA12(正), PWM1=PA7 (反) [TIMA0 CC3/CC1]
+ *   灰度: AD0=PB25 AD1=PA25 AD2=PA27 OUT=PB20
+ *   左编码器: A=PB23 B=PB27; 右编码器: A=PA18 B=PB14
+ *   陀螺仪: UART0 TX=PA28 RX=PA31; 蓝牙: UART2 TX=PA21 RX=PA22
  */
 
 #include "ti_msp_dl_config.h"
@@ -49,6 +49,9 @@ void SysTick_Handler(void)
  * 再把 ENCODER_COUNTS_AT_SPEED_MAX 调成空载现有速度，可保持加重前后速度。 */
 #define ENCODER_CLOSED_LOOP_ENABLE       1
 #define SPEED_LOOP_DIVIDER               5  /* 5×4ms = 20ms              */
+#define SPEED_LOOP_NOMINAL_MS            20
+#define SPEED_SAMPLE_MIN_MS             16  /* 异常采样窗直接重同步         */
+#define SPEED_SAMPLE_MAX_MS             28
 #define ENCODER_COUNTS_AT_SPEED_MAX     24  /* ★ SPEED_MAX时每20ms计数    */
 #define ENCODER_LEFT_SIGN              (+1) /* ★ 前进时计数须为正          */
 #define ENCODER_RIGHT_SIGN             (-1) /* ★ 若前进为负则对调A/B或改符号 */
@@ -57,6 +60,24 @@ void SysTick_Handler(void)
 #define SPEED_PI_I_MAX                 600  /* 积分项限幅                   */
 #define SPEED_PI_CORRECTION_MAX        900  /* 相对原PWM的最大补偿          */
 #define SPEED_WRONG_DIR_CONFIRM_TICKS    3  /* 60ms反向后退出闭环防失控     */
+#define SPEED_REVERSE_GRACE_TICKS        8  /* 换向后最多160ms等待惯性消退  */
+#define SPEED_REVERSE_READY_TICKS        2  /* 连续40ms方向正确即可提前闭环 */
+#define SPEED_FEEDBACK_ARM_TICKS          3  /* 连续60ms可信后才首次闭环     */
+#define SPEED_FEEDBACK_MAX_MULTIPLIER     4  /* 超过目标4倍视为脉冲噪声     */
+#define SPEED_FEEDBACK_MAX_MARGIN         8  /* 低目标时的合理计数余量       */
+#define SPEED_MIN_CLOSED_LOOP_COUNTS     3  /* 低速量化太粗时保持原开环行为 */
+#define SPEED_NO_PULSE_CONFIRM_TICKS    10  /* 可信目标下200ms无脉冲判故障  */
+#define SPEED_PIVOT_NO_PULSE_TICKS      25  /* 原地转允许500ms有限抗堵转    */
+#define SPEED_INVALID_CONFIRM_TICKS      3  /* 连续60ms非法跳变判信号故障   */
+#define SPEED_INVALID_MIN_PER_TICK        2  /* 单窗至少2次非法跳变才累计故障 */
+#define SPEED_FAULT_RECOVER_TICKS        5  /* 连续100ms可信反馈自动恢复     */
+#define SPEED_NO_PULSE_CORRECTION_MAX  400  /* 堵转/掉线确认前的补偿上限    */
+#define SPEED_STARTUP_ASSIST_DELAY_TICKS  2  /* 40ms未动后才开始有限助力      */
+#define SPEED_STARTUP_ASSIST_MIN_COUNTS    8  /* 低速/转弯内轮不启用起步助力  */
+#define SPEED_STARTUP_ASSIST_STEP        50  /* 每20ms增加的起步助力PWM       */
+#define SPEED_STARTUP_ASSIST_MAX        250  /* 未确认编码器时绝不超过此助力  */
+#define SPEED_PIVOT_CORRECTION_MAX      120  /* 原地转只允许小幅轮速修正      */
+#define SPEED_CORRECTION_SLEW_PER_TICK  120  /* 每20ms补偿变化上限            */
 
 /* ── 转向 ── */
 #define STEER_K            25    /* ★ 转向增益 (降低→直道不抖)            */
@@ -82,14 +103,17 @@ void SysTick_Handler(void)
 /* ── 圈数控制 ── */
 #define TARGET_LAPS         5    /* ★ 目标圈数                            */
 #define CORNERS_PER_LAP     4    /* 正方形每圈4个弯                       */
-#define CORNER_LOCK_MS   1000    /* ★ 数到弯后锁定时间(ms), 防重复触发    */
-                                 /*   必须 > 整个转弯过程耗时              */
-                                 /*   必须 < 转弯+一段直道总耗时           */
+#define COUNT_STARTUP_GUARD_MS 1000 /* 上电后暂不计弯，防起跑误触发          */
+#define FINISH_RUNOUT_MS   1000  /* 最后一弯完成后至少继续循迹的时间        */
+#define CORNER_REARM_TICKS    5  /* 连续20ms稳定中线后允许检测下一弯       */
+#define PIVOT_EXIT_GUARD_MS 100  /* 退出pivot后的最短状态稳定时间          */
 
-/* ── 陀螺仪辅助 (HLK-AS201, UART_GYRO=UART1 PA8/PA9, 20Hz 主动上报) ──
+/* ── 陀螺仪辅助 (HLK-AS201, UART_GYRO=UART0 PA28/PA31, 20Hz 主动上报) ──
  *   全部为"叠加增强": 陀螺仪没接/掉线时 gyro_ok=0, 下列逻辑自动跳过,
  *   行为完全退回原纯灰度循迹, 不影响现有效果。                          */
-#define GYRO_ENABLE          1     /* 0=编译期完全禁用陀螺仪辅助            */
+#ifndef GYRO_ENABLE
+#define GYRO_ENABLE          1     /* 0=编译期禁用陀螺仪算法辅助            */
+#endif
 #define GYRO_REPORT_FLAGS   (AS201_SUB_GYRO | AS201_SUB_ANGLE)
 #define GYRO_FILTER_ALPHA    0.50f /* 20Hz角速度一阶低通系数; 越大响应越快   */
 #define GYRO_FRESH_MS         120  /* 控制只使用足够新的样本; 约2个上报周期  */
@@ -112,8 +136,10 @@ void SysTick_Handler(void)
 #define TURN_MAX_DEG       92.0f   /* 漏检灰度时的转角硬上限, 防止转到180°  */
 #define TURN_REACQUIRE_MIN_MS 180  /* 起转后至少等待此时长才接受灰度回中    */
 #define TURN_CENTER_CONFIRM_TICKS 1 /* 角度门控后单拍回中即可退出             */
-#define TURN_YAW_DIR_MIN     0.5f  /* 首个有效yaw增量阈值, 用于自适应方向    */
+#define TURN_YAW_DIR_CONFIRM_DEG 2.0f /* 累计净yaw达到此值后才锁定转向符号    */
+#define TURN_WRONG_WAY_DEG   6.0f  /* 已学习方向后，反转超过此角立即放弃     */
 #define GYRO_LOST_MS       300     /* 超过此时间没有新帧→判掉线, 自动退回   */
+#define OUTER_CONFIRM_TICKS  2     /* 外侧探头连续8ms有效才确认直角弯        */
 #define SHARP_ERR_CONFIRM_TICKS 5   /* 非外侧探头触发pivot需连续20ms确认      */
 
 /* ================================================================
@@ -125,7 +151,10 @@ static uint8_t   scan_ch  = 0;
 
 /* ── 圈数计数 ── */
 static uint16_t  corner_count    = 0;  /* 已数到的弯数                   */
-static uint32_t  corner_unlock   = 1000; /* 初值1000:上电1秒内屏蔽计数,防起跑误触发 */
+static uint32_t  corner_unlock   = COUNT_STARTUP_GUARD_MS;
+static uint8_t   corner_pending  = 0;  /* 1=已触发，等待转弯完成后提交计数 */
+static uint8_t   corner_armed    = 1;  /* 1=允许检测一个新弯               */
+static uint8_t   corner_rearm_ticks = 0;
 static uint8_t   finishing       = 0;  /* 1=最后一个弯已数到, 转完后停车 */
 static uint8_t   car_stopped     = 0;  /* 1=已停车                       */
 
@@ -134,26 +163,42 @@ static uint8_t   car_stopped     = 0;  /* 1=已停车                       */
 static uint8_t   pivot_state     = 0;
 static uint32_t  pivot_t_end     = 0;  /* 当前阶段结束时刻(ms)           */
 static int32_t   pivot_dir       = 1;  /* 转向方向: +1右 / -1左          */
-static uint32_t  pivot_unlock    = 0;  /* pivot冷却: 转完后锁定,防重复触发 */
+static uint32_t  pivot_unlock    = 0;  /* pivot退出后的短时状态保护       */
 
 /* ── 陀螺仪辅助运行时状态 ── */
+#if GYRO_ENABLE
 static AS201_Handle g_gyro;             /* 驱动句柄                        */
+#endif
 static uint8_t   gyro_ok        = 0;    /* 1=陀螺仪在线且数据有效          */
 static uint32_t  gyro_last_cnt  = 0;    /* 上次见到的有效帧计数(判掉线)    */
+#if GYRO_ENABLE
 static uint32_t  gyro_last_ms   = 0;    /* 上次收到新帧的时刻(ms)          */
+#endif
 static float     gyro_gz        = 0.0f; /* 最新 Z 轴角速度 (°/s)           */
 static float     gyro_yaw       = 0.0f; /* 最新航向角 (°)                   */
+#if GYRO_ENABLE
 static uint8_t   gyro_filter_ready = 0;
+#endif
 static float     turn_accum_deg = 0.0f; /* pivot 原地转阶段累计转过角度(°) */
+static float     turn_abs_deg   = 0.0f; /* 不分方向的总角行程，用于硬保护    */
 static uint32_t  turn_last_frame = 0;
 static float     turn_last_yaw   = 0.0f;
-static int8_t    turn_yaw_sign   = 0;    /* 首个有效增量确定本次转弯正方向   */
+static float     turn_yaw_probe_deg = 0.0f; /* 定向确认/锁定后反转检测累计量   */
+static int8_t    turn_yaw_sign   = 0;    /* 净yaw确认后的本次转弯正方向      */
+#if GYRO_ENABLE
+static int8_t    gyro_turn_polarity = 0; /* yaw符号/pivot_dir，首个成功弯学习 */
+#endif
+static uint8_t   turn_wrong_way  = 0;
 static uint8_t   turn_yaw_ready  = 0;
 static uint8_t   turn_center_hits = 0;
 static uint8_t   turn_line_departed = 0;
 static uint32_t  pivot_turn_start_ms = 0;
 static uint8_t   turn_stall_ticks = 0;
+static uint8_t   turn_boost_active = 0;
+static uint8_t   outer_confirm_ticks = 0;
+static int8_t    outer_candidate_dir = 0;
 static uint8_t   sharp_err_ticks = 0;
+static int8_t    sharp_candidate_dir = 0;
 
 /* ── 双轮编码器与内环稳速 ── */
 typedef struct {
@@ -163,7 +208,13 @@ typedef struct {
     int32_t integral;         /* PI积分输出(PWM单位)                      */
     int32_t pwm;              /* 实际下发PWM                              */
     uint8_t wrong_dir_ticks;  /* 编码器方向错误连续计数                    */
+    uint8_t reverse_grace_ticks; /* 换向后的开环宽限期                     */
+    uint8_t no_pulse_ticks;   /* 有可信速度目标但无脉冲的连续计数          */
+    uint8_t invalid_ticks;    /* 异常反馈窗口连续计数                      */
+    uint8_t good_feedback_ticks; /* 故障恢复/换向确认计数                  */
+    uint8_t feedback_seen;    /* 当前方向已收到过可信反馈                  */
     uint8_t direction_fault;  /* 1=方向异常，已回退原PWM前馈               */
+    uint8_t signal_fault;     /* 1=无脉冲/非法跳变，已回退原PWM前馈        */
 } WheelSpeedControl;
 
 static WheelSpeedControl speed_left;
@@ -176,6 +227,8 @@ static volatile uint8_t encoder_left_state  = 0;
 static volatile uint8_t encoder_right_state = 0;
 static uint32_t encoder_left_last  = 0;
 static uint32_t encoder_right_last = 0;
+static uint32_t encoder_left_invalid_control_last  = 0;
+static uint32_t encoder_right_invalid_control_last = 0;
 
 /* ── JDY-31 蓝牙调试输出 (每100ms一行, 不影响循迹) ── */
 static volatile uint8_t  dbg_ready  = 0;   /* 1=有新数据待发送            */
@@ -183,6 +236,7 @@ static volatile float    dbg_gz     = 0.0f;
 static volatile float    dbg_yaw    = 0.0f;
 static volatile uint8_t  dbg_ok     = 0;
 static volatile float    dbg_turns  = 0.0f;
+static volatile uint16_t dbg_corner_count = 0;
 static volatile int32_t  dbg_l_target = 0;
 static volatile int32_t  dbg_l_measured = 0;
 static volatile int32_t  dbg_l_pwm = 0;
@@ -236,12 +290,12 @@ static void mux_set(uint8_t ch)
     uint8_t c = (ch >> 2) & 1;
     uint8_t b = (ch >> 1) & 1;
     uint8_t a =  ch        & 1;
-    if (a) DL_GPIO_setPins(  GRP_GRAY_PORT, GRP_GRAY_AD0_PIN);
-    else   DL_GPIO_clearPins(GRP_GRAY_PORT, GRP_GRAY_AD0_PIN);
-    if (b) DL_GPIO_setPins(  GRP_GRAY_PORT, GRP_GRAY_AD1_PIN);
-    else   DL_GPIO_clearPins(GRP_GRAY_PORT, GRP_GRAY_AD1_PIN);
-    if (c) DL_GPIO_setPins(  GRP_GRAY_PORT, GRP_GRAY_AD2_PIN);
-    else   DL_GPIO_clearPins(GRP_GRAY_PORT, GRP_GRAY_AD2_PIN);
+    if (a) DL_GPIO_setPins(  GRP_GRAY_AD0_PORT, GRP_GRAY_AD0_PIN);
+    else   DL_GPIO_clearPins(GRP_GRAY_AD0_PORT, GRP_GRAY_AD0_PIN);
+    if (b) DL_GPIO_setPins(  GRP_GRAY_AD1_PORT, GRP_GRAY_AD1_PIN);
+    else   DL_GPIO_clearPins(GRP_GRAY_AD1_PORT, GRP_GRAY_AD1_PIN);
+    if (c) DL_GPIO_setPins(  GRP_GRAY_AD2_PORT, GRP_GRAY_AD2_PIN);
+    else   DL_GPIO_clearPins(GRP_GRAY_AD2_PORT, GRP_GRAY_AD2_PIN);
 }
 
 /* ================================================================
@@ -261,7 +315,6 @@ static int8_t calc_err(void)
     return last_err;
 }
 
-#if GYRO_ENABLE
 static uint8_t line_is_visible(void)
 {
     for (uint8_t i = 0; i < 8; i++) {
@@ -269,7 +322,6 @@ static uint8_t line_is_visible(void)
     }
     return 0;
 }
-#endif
 
 static uint8_t gyro_is_fresh(uint32_t now)
 {
@@ -290,6 +342,11 @@ static float yaw_delta_deg(float current, float previous)
     return delta;
 }
 #endif
+
+static uint8_t time_reached(uint32_t now, uint32_t deadline)
+{
+    return (int32_t)(now - deadline) >= 0;
+}
 
 /* ================================================================
  *  双路正交编码器: 四个GPIO双边沿中断，x4状态表译码
@@ -312,11 +369,12 @@ static uint8_t encoder_read_left_state(void)
 
 static uint8_t encoder_read_right_state(void)
 {
-    uint32_t pins = DL_GPIO_readPins(GRP_ENCODER_RIGHT_A_PORT,
-                                     GRP_ENCODER_RIGHT_A_PIN |
-                                     GRP_ENCODER_RIGHT_B_PIN);
-    return (uint8_t)(((pins & GRP_ENCODER_RIGHT_A_PIN) ? 2U : 0U) |
-                     ((pins & GRP_ENCODER_RIGHT_B_PIN) ? 1U : 0U));
+    uint32_t pin_a = DL_GPIO_readPins(GRP_ENCODER_RIGHT_A_PORT,
+                                      GRP_ENCODER_RIGHT_A_PIN);
+    uint32_t pin_b = DL_GPIO_readPins(GRP_ENCODER_RIGHT_B_PORT,
+                                      GRP_ENCODER_RIGHT_B_PIN);
+    return (uint8_t)(((pin_a & GRP_ENCODER_RIGHT_A_PIN) ? 2U : 0U) |
+                     ((pin_b & GRP_ENCODER_RIGHT_B_PIN) ? 1U : 0U));
 }
 
 static void encoder_decode_left(void)
@@ -349,27 +407,33 @@ static void encoder_decode_right(void)
 
 void GROUP1_IRQHandler(void)
 {
-    const uint32_t left_mask = GRP_ENCODER_LEFT_A_PIN |
-                               GRP_ENCODER_LEFT_B_PIN;
-    const uint32_t right_mask = GRP_ENCODER_RIGHT_A_PIN |
-                                GRP_ENCODER_RIGHT_B_PIN;
+    const uint32_t gpioa_right_mask = GRP_ENCODER_RIGHT_A_PIN;
+    const uint32_t gpiob_left_mask = GRP_ENCODER_LEFT_A_PIN |
+                                     GRP_ENCODER_LEFT_B_PIN;
+    const uint32_t gpiob_right_mask = GRP_ENCODER_RIGHT_B_PIN;
+    const uint32_t gpiob_mask = gpiob_left_mask | gpiob_right_mask;
 
-    /* 清除后再采样；若处理期间又来新边沿，状态位保留并立即再循环。 */
+    /* PA18在GPIOA，其余编码器脚在GPIOB；按端口清除后每轮只译码一次。 */
     for (uint8_t retry = 0; retry < 4; retry++) {
-        uint32_t pending_left = DL_GPIO_getEnabledInterruptStatus(
-            GRP_ENCODER_LEFT_A_PORT, left_mask);
-        uint32_t pending_right = DL_GPIO_getEnabledInterruptStatus(
-            GRP_ENCODER_RIGHT_A_PORT, right_mask);
+        uint32_t pending_gpioa = DL_GPIO_getEnabledInterruptStatus(
+            GRP_ENCODER_RIGHT_A_PORT, gpioa_right_mask);
+        uint32_t pending_gpiob = DL_GPIO_getEnabledInterruptStatus(
+            GRP_ENCODER_LEFT_A_PORT, gpiob_mask);
 
-        if ((pending_left | pending_right) == 0U) break;
-        if (pending_left != 0U) {
+        if ((pending_gpioa | pending_gpiob) == 0U) break;
+        if (pending_gpioa != 0U) {
+            DL_GPIO_clearInterruptStatus(GRP_ENCODER_RIGHT_A_PORT,
+                                         pending_gpioa & gpioa_right_mask);
+        }
+        if (pending_gpiob != 0U) {
             DL_GPIO_clearInterruptStatus(GRP_ENCODER_LEFT_A_PORT,
-                                         pending_left & left_mask);
+                                         pending_gpiob & gpiob_mask);
+        }
+        if ((pending_gpiob & gpiob_left_mask) != 0U) {
             encoder_decode_left();
         }
-        if (pending_right != 0U) {
-            DL_GPIO_clearInterruptStatus(GRP_ENCODER_RIGHT_A_PORT,
-                                         pending_right & right_mask);
+        if (pending_gpioa != 0U ||
+            (pending_gpiob & gpiob_right_mask) != 0U) {
             encoder_decode_right();
         }
     }
@@ -377,15 +441,15 @@ void GROUP1_IRQHandler(void)
 
 static void encoder_init(void)
 {
-    const uint32_t left_mask = GRP_ENCODER_LEFT_A_PIN |
-                               GRP_ENCODER_LEFT_B_PIN;
-    const uint32_t right_mask = GRP_ENCODER_RIGHT_A_PIN |
+    const uint32_t gpioa_mask = GRP_ENCODER_RIGHT_A_PIN;
+    const uint32_t gpiob_mask = GRP_ENCODER_LEFT_A_PIN |
+                                GRP_ENCODER_LEFT_B_PIN |
                                 GRP_ENCODER_RIGHT_B_PIN;
 
     encoder_left_state  = encoder_read_left_state();
     encoder_right_state = encoder_read_right_state();
-    DL_GPIO_clearInterruptStatus(GRP_ENCODER_LEFT_A_PORT, left_mask);
-    DL_GPIO_clearInterruptStatus(GRP_ENCODER_RIGHT_A_PORT, right_mask);
+    DL_GPIO_clearInterruptStatus(GRP_ENCODER_RIGHT_A_PORT, gpioa_mask);
+    DL_GPIO_clearInterruptStatus(GRP_ENCODER_LEFT_A_PORT, gpiob_mask);
     NVIC_ClearPendingIRQ(GRP_ENCODER_GPIOA_INT_IRQN);
     NVIC_ClearPendingIRQ(GRP_ENCODER_GPIOB_INT_IRQN);
     NVIC_SetPriority(GRP_ENCODER_GPIOA_INT_IRQN, 0);
@@ -395,7 +459,7 @@ static void encoder_init(void)
 }
 
 /* ================================================================
- *  电机PWM底层  (A4950: motor_pwm(0,0) = 制动)
+ *  电机PWM底层  (AT8236: motor_pwm(0,0) = 制动)
  * ================================================================ */
 static int32_t clamp_i32(int32_t value, int32_t low, int32_t high)
 {
@@ -404,24 +468,64 @@ static int32_t clamp_i32(int32_t value, int32_t low, int32_t high)
     return value;
 }
 
+/* 速度内环只能减到0制动，绝不能擅自把外环命令反向。 */
+static int32_t clamp_pwm_to_command_direction(int32_t command, int32_t pwm)
+{
+    if (command > 0) return clamp_i32(pwm, 0, MOTOR_MAX);
+    if (command < 0) return clamp_i32(pwm, -MOTOR_MAX, 0);
+    return 0;
+}
+
+static int32_t speed_pivot_correction_limit(void)
+{
+    return turn_boost_active ?
+        0 : SPEED_PIVOT_CORRECTION_MAX;
+}
+
+static void speed_decay_correction(WheelSpeedControl *wheel)
+{
+    int32_t correction = wheel->pwm - wheel->command;
+    if (correction > SPEED_CORRECTION_SLEW_PER_TICK) {
+        correction -= SPEED_CORRECTION_SLEW_PER_TICK;
+    } else if (correction < -SPEED_CORRECTION_SLEW_PER_TICK) {
+        correction += SPEED_CORRECTION_SLEW_PER_TICK;
+    } else {
+        correction = 0;
+    }
+    wheel->pwm = clamp_pwm_to_command_direction(
+        wheel->command, wheel->command + correction);
+}
+
 static void motor_pwm(int32_t l, int32_t r)
 {
     l = clamp_i32(l, -MOTOR_MAX, MOTOR_MAX);
     r = clamp_i32(r, -MOTOR_MAX, MOTOR_MAX);
 
+    /*
+     * 向下计数PWM中 compare=0 为恒高。先把目标方向输入置为恒高，
+     * 让换向经过 IN1=IN2=高的制动状态，再在另一输入写入驱动力。
+     */
     if (l >= 0) {
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  l, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  0, DL_TIMER_CC_2_INDEX);
+        DL_TimerA_setCaptureCompareValue(
+            PWM_LEFT_INST, 0, GPIO_PWM_LEFT_C1_IDX);       /* PWM4: 正 */
+        DL_TimerA_setCaptureCompareValue(
+            PWM_LEFT_INST, l, GPIO_PWM_LEFT_C0_IDX);       /* PWM3: 调速 */
     } else {
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  0, DL_TIMER_CC_0_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, -l, DL_TIMER_CC_2_INDEX);
+        DL_TimerA_setCaptureCompareValue(
+            PWM_LEFT_INST, 0, GPIO_PWM_LEFT_C0_IDX);       /* PWM3: 反 */
+        DL_TimerA_setCaptureCompareValue(
+            PWM_LEFT_INST, -l, GPIO_PWM_LEFT_C1_IDX);      /* PWM4: 调速 */
     }
     if (r >= 0) {
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  r, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  0, DL_TIMER_CC_3_INDEX);
+        DL_TimerA_setCaptureCompareValue(
+            PWM_RIGHT_INST, 0, GPIO_PWM_RIGHT_C3_IDX);     /* PWM2: 正 */
+        DL_TimerA_setCaptureCompareValue(
+            PWM_RIGHT_INST, r, GPIO_PWM_RIGHT_C1_IDX);     /* PWM1: 调速 */
     } else {
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST,  0, DL_TIMER_CC_1_INDEX);
-        DL_TimerA_setCaptureCompareValue(PWM_DRIVE_INST, -r, DL_TIMER_CC_3_INDEX);
+        DL_TimerA_setCaptureCompareValue(
+            PWM_RIGHT_INST, 0, GPIO_PWM_RIGHT_C1_IDX);     /* PWM1: 反 */
+        DL_TimerA_setCaptureCompareValue(
+            PWM_RIGHT_INST, -r, GPIO_PWM_RIGHT_C3_IDX);    /* PWM2: 调速 */
     }
 }
 
@@ -437,6 +541,13 @@ static void speed_set_wheel_command(WheelSpeedControl *wheel, int32_t command)
 {
     int32_t old_command = wheel->command;
     command = clamp_i32(command, -MOTOR_MAX, MOTOR_MAX);
+    int32_t new_target = speed_command_to_counts(command);
+    uint8_t direction_changed = old_command != 0 && command != 0 &&
+        ((old_command < 0) != (command < 0));
+    int32_t old_magnitude = (old_command < 0) ? -old_command : old_command;
+    int32_t new_magnitude = (command < 0) ? -command : command;
+    uint8_t large_speed_drop = old_magnitude > 0 &&
+        new_magnitude * 2 <= old_magnitude;
 
     if (command == 0) {
         wheel->command = 0;
@@ -444,22 +555,70 @@ static void speed_set_wheel_command(WheelSpeedControl *wheel, int32_t command)
         wheel->integral = 0;
         wheel->pwm = 0;
         wheel->wrong_dir_ticks = 0;
+        wheel->reverse_grace_ticks = 0;
+        wheel->no_pulse_ticks = 0;
+        wheel->invalid_ticks = 0;
+        wheel->good_feedback_ticks = 0;
+        wheel->feedback_seen = 0;
         wheel->direction_fault = 0;
+        wheel->signal_fault = 0;
         return;
     }
 
-    if (old_command == 0 || ((old_command < 0) != (command < 0))) {
+    /* 目标低于编码器分辨率时立即清旧补偿，避免弯道内轮跨零反转。 */
+    int32_t abs_target = (new_target < 0) ? -new_target : new_target;
+    if (abs_target < SPEED_MIN_CLOSED_LOOP_COUNTS) {
+        wheel->command = command;
+        wheel->target = new_target;
+        wheel->integral = 0;
+        wheel->pwm = command;
+        wheel->wrong_dir_ticks = 0;
+        if (direction_changed) {
+            wheel->reverse_grace_ticks = SPEED_REVERSE_GRACE_TICKS;
+        } else if (old_command == 0) {
+            wheel->reverse_grace_ticks = 0;
+        }
+        wheel->no_pulse_ticks = 0;
+        wheel->invalid_ticks = 0;
+        wheel->good_feedback_ticks = 0;
+        if (old_command == 0 || direction_changed) {
+            wheel->feedback_seen = 0;
+            wheel->direction_fault = 0;
+            wheel->signal_fault = 0;
+        }
+        return;
+    }
+
+    if (old_command == 0 || direction_changed) {
         wheel->integral = 0;
         wheel->wrong_dir_ticks = 0;
+        wheel->reverse_grace_ticks = (old_command != 0) ?
+            SPEED_REVERSE_GRACE_TICKS : 0;
+        wheel->no_pulse_ticks = 0;
+        wheel->invalid_ticks = 0;
+        wheel->good_feedback_ticks = 0;
+        wheel->feedback_seen = 0;
         wheel->direction_fault = 0;
+        wheel->signal_fault = 0;
         wheel->pwm = command;
     } else {
         /* 外环命令变化立即体现在PWM上，同时保留当前PI补偿。 */
-        wheel->pwm = clamp_i32(wheel->pwm + command - old_command,
-                               -MOTOR_MAX, MOTOR_MAX);
+        int32_t preserved_correction = wheel->pwm - old_command;
+        if (large_speed_drop) {
+            preserved_correction = 0;
+            wheel->integral = 0;
+        }
+        if (pivot_state == 2) {
+            int32_t pivot_limit = speed_pivot_correction_limit();
+            preserved_correction = clamp_i32(preserved_correction,
+                -pivot_limit, pivot_limit);
+            wheel->integral = 0;
+        }
+        wheel->pwm = clamp_pwm_to_command_direction(
+            command, command + preserved_correction);
     }
     wheel->command = command;
-    wheel->target = speed_command_to_counts(command);
+    wheel->target = new_target;
 }
 
 /* 外环仍按原PWM尺度调用；底层将其解释为轮速目标并立即施加前馈。 */
@@ -470,7 +629,8 @@ static void motor(int32_t l, int32_t r)
     motor_pwm(speed_left.pwm, speed_right.pwm);
 }
 
-static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured)
+static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured,
+                               uint32_t invalid_delta, uint32_t elapsed_ms)
 {
     wheel->measured = measured;
     wheel->target = speed_command_to_counts(wheel->command);
@@ -479,67 +639,337 @@ static void speed_update_wheel(WheelSpeedControl *wheel, int32_t measured)
         wheel->integral = 0;
         wheel->pwm = wheel->command;
         wheel->wrong_dir_ticks = 0;
+        if (wheel->reverse_grace_ticks > 0) {
+            wheel->reverse_grace_ticks--;
+        }
+        wheel->no_pulse_ticks = 0;
+        wheel->invalid_ticks = 0;
+        wheel->good_feedback_ticks = 0;
         return;
     }
 
-    if (measured != 0 && ((measured < 0) != (wheel->target < 0))) {
+    int32_t abs_target = (wheel->target < 0) ? -wheel->target : wheel->target;
+    int32_t abs_measured = (measured < 0) ? -measured : measured;
+    uint8_t no_pulse_limit = (pivot_state == 2) ?
+        SPEED_PIVOT_NO_PULSE_TICKS : SPEED_NO_PULSE_CONFIRM_TICKS;
+    uint8_t wrong_direction = measured != 0 &&
+        ((measured < 0) != (wheel->target < 0));
+    uint8_t plausible_feedback = abs_measured <=
+        abs_target * SPEED_FEEDBACK_MAX_MULTIPLIER + SPEED_FEEDBACK_MAX_MARGIN;
+    uint8_t invalid_window =
+        invalid_delta >= SPEED_INVALID_MIN_PER_TICK &&
+        invalid_delta > (((uint32_t)abs_measured + 3U) / 4U);
+    uint8_t implausible_window = measured != 0 && !wrong_direction &&
+        !plausible_feedback;
+    uint8_t bad_signal_window = invalid_window || implausible_window;
+    uint8_t clean_feedback = measured != 0 && !wrong_direction &&
+        plausible_feedback && !invalid_window;
+
+    /* 低速时单周期只有0~2个脉冲，PI会被量化噪声驱动；保留原开环更稳。 */
+    if (abs_target < SPEED_MIN_CLOSED_LOOP_COUNTS) {
+        wheel->integral = 0;
+        wheel->pwm = wheel->command;
+        wheel->wrong_dir_ticks = 0;
+        if (wheel->reverse_grace_ticks > 0) {
+            wheel->reverse_grace_ticks--;
+        }
+        wheel->no_pulse_ticks = 0;
+        wheel->invalid_ticks = 0;
+        wheel->good_feedback_ticks = 0;
+        return;
+    }
+
+    /* H桥换向时先开环等待；新方向连续可信后可早于160ms恢复闭环。 */
+    if (wheel->reverse_grace_ticks > 0) {
+        wheel->reverse_grace_ticks--;
+        wheel->integral = 0;
+        wheel->pwm = wheel->command;
+        wheel->wrong_dir_ticks = 0;
+        wheel->no_pulse_ticks = 0;
+        wheel->invalid_ticks = 0;
+        if (clean_feedback) {
+            if (wheel->good_feedback_ticks < SPEED_REVERSE_READY_TICKS) {
+                wheel->good_feedback_ticks++;
+            }
+            if (wheel->good_feedback_ticks >= SPEED_REVERSE_READY_TICKS) {
+                wheel->reverse_grace_ticks = 0;
+                wheel->good_feedback_ticks = 0;
+                wheel->feedback_seen = 1;
+                return;
+            } else {
+                return;
+            }
+        } else {
+            wheel->good_feedback_ticks = 0;
+            return;
+        }
+    }
+
+    /* 严重非法跳变或同向超量脉冲不更新PI，避免噪声造成瞬时制动。 */
+    if (bad_signal_window) {
+        if (wheel->invalid_ticks < SPEED_INVALID_CONFIRM_TICKS) {
+            wheel->invalid_ticks++;
+        }
+        wheel->good_feedback_ticks = 0;
+        if (wheel->invalid_ticks >= SPEED_INVALID_CONFIRM_TICKS) {
+            wheel->signal_fault = 1;
+        }
+        wheel->integral = 0;
+        if (wheel->direction_fault || wheel->signal_fault) {
+            wheel->pwm = wheel->command;
+        } else {
+            speed_decay_correction(wheel);
+        }
+        return;
+    }
+    wheel->invalid_ticks = 0;
+
+    if (wrong_direction) {
         if (wheel->wrong_dir_ticks < SPEED_WRONG_DIR_CONFIRM_TICKS) {
             wheel->wrong_dir_ticks++;
         }
-    } else {
-        wheel->wrong_dir_ticks = 0;
+    } else if (wheel->wrong_dir_ticks > 0) {
+        wheel->wrong_dir_ticks--;
+    }
+
+    uint8_t plausible_missing = measured == 0 ||
+        (!wrong_direction && !plausible_feedback);
+    if (plausible_missing) {
+        if (wheel->no_pulse_ticks < no_pulse_limit) {
+            wheel->no_pulse_ticks++;
+        }
+    } else if (wheel->no_pulse_ticks > 0) {
+        wheel->no_pulse_ticks--;
     }
 
     if (wheel->wrong_dir_ticks >= SPEED_WRONG_DIR_CONFIRM_TICKS) {
-        /* A/B顺序或方向符号错误时禁止PI继续加力，保留原开环行为。 */
         wheel->direction_fault = 1;
+    }
+    if (wrong_direction) {
+        wheel->good_feedback_ticks = 0;
+        wheel->integral = 0;
+        if (wheel->direction_fault || wheel->signal_fault) {
+            wheel->pwm = wheel->command;
+        } else {
+            speed_decay_correction(wheel);
+        }
+        return;
+    }
+    if (wheel->no_pulse_ticks >= no_pulse_limit) {
+        wheel->signal_fault = 1;
+    }
+    if (wheel->direction_fault || wheel->signal_fault) {
+        if (clean_feedback) {
+            if (wheel->good_feedback_ticks < SPEED_FAULT_RECOVER_TICKS) {
+                wheel->good_feedback_ticks++;
+            }
+        } else {
+            wheel->good_feedback_ticks = 0;
+        }
+
+        /* 故障期间保持原开环；连续可信反馈后从零积分平滑恢复。 */
         wheel->integral = 0;
         wheel->pwm = wheel->command;
+        if (wheel->good_feedback_ticks >= SPEED_FAULT_RECOVER_TICKS) {
+            wheel->direction_fault = 0;
+            wheel->signal_fault = 0;
+            wheel->wrong_dir_ticks = 0;
+            wheel->no_pulse_ticks = 0;
+            wheel->invalid_ticks = 0;
+            wheel->good_feedback_ticks = 0;
+            wheel->feedback_seen = 1;
+        }
         return;
     }
 
-#if ENCODER_CLOSED_LOOP_ENABLE
-    if (!wheel->direction_fault) {
-        int32_t error = wheel->target - measured;
-        int32_t integral_next = clamp_i32(
-            wheel->integral + SPEED_PI_KI * error,
-            -SPEED_PI_I_MAX, SPEED_PI_I_MAX);
-        int32_t proportional = SPEED_PI_KP * error;
-        int32_t correction_raw = proportional + integral_next;
-
-        /* 补偿饱和时冻结同方向积分，防止脱困后速度冲高。 */
-        if ((correction_raw > SPEED_PI_CORRECTION_MAX && error > 0) ||
-            (correction_raw < -SPEED_PI_CORRECTION_MAX && error < 0)) {
-            integral_next = wheel->integral;
-            correction_raw = proportional + integral_next;
+    /* 首次闭环前要求连续可信反馈；静摩擦时只给有限、渐进的起步助力。 */
+    if (!wheel->feedback_seen) {
+        wheel->integral = 0;
+        wheel->pwm = wheel->command;
+        if (clean_feedback) {
+            if (wheel->good_feedback_ticks < SPEED_FEEDBACK_ARM_TICKS) {
+                wheel->good_feedback_ticks++;
+            }
+            if (wheel->good_feedback_ticks >= SPEED_FEEDBACK_ARM_TICKS) {
+                wheel->feedback_seen = 1;
+                wheel->good_feedback_ticks = 0;
+            }
+            return;
         }
-        wheel->integral = integral_next;
-        int32_t correction = clamp_i32(correction_raw,
-            -SPEED_PI_CORRECTION_MAX, SPEED_PI_CORRECTION_MAX);
-        wheel->pwm = clamp_i32(wheel->command + correction,
-                               -MOTOR_MAX, MOTOR_MAX);
+
+        wheel->good_feedback_ticks = 0;
+        uint8_t both_wheels_same_direction =
+            speed_left.command != 0 && speed_right.command != 0 &&
+            ((speed_left.command < 0) == (speed_right.command < 0));
+        if (abs_target >= SPEED_STARTUP_ASSIST_MIN_COUNTS &&
+            both_wheels_same_direction && pivot_state != 2 && measured == 0 &&
+            wheel->no_pulse_ticks > SPEED_STARTUP_ASSIST_DELAY_TICKS) {
+            int32_t assist =
+                (wheel->no_pulse_ticks - SPEED_STARTUP_ASSIST_DELAY_TICKS) *
+                SPEED_STARTUP_ASSIST_STEP;
+            if (assist > SPEED_STARTUP_ASSIST_MAX) {
+                assist = SPEED_STARTUP_ASSIST_MAX;
+            }
+            if (wheel->target < 0) assist = -assist;
+            wheel->pwm = clamp_pwm_to_command_direction(
+                wheel->command, wheel->command + assist);
+        }
+        return;
     }
+    wheel->good_feedback_ticks = 0;
+
+#if ENCODER_CLOSED_LOOP_ENABLE
+    int32_t error = wheel->target - measured;
+    int32_t correction_limit = (measured == 0) ?
+        SPEED_NO_PULSE_CORRECTION_MAX : SPEED_PI_CORRECTION_MAX;
+    if (pivot_state == 2) {
+        int32_t pivot_limit = speed_pivot_correction_limit();
+        if (correction_limit > pivot_limit) correction_limit = pivot_limit;
+    }
+    if (pivot_state == 2) wheel->integral = 0;
+
+    int32_t integral_step = SPEED_PI_KI * error * (int32_t)elapsed_ms /
+                            SPEED_LOOP_NOMINAL_MS;
+    int32_t integral_next = (pivot_state == 2) ? 0 : clamp_i32(
+        wheel->integral + integral_step,
+        -SPEED_PI_I_MAX, SPEED_PI_I_MAX);
+    int32_t proportional = SPEED_PI_KP * error;
+    int32_t correction_raw = proportional + integral_next;
+    int32_t correction_low = -correction_limit;
+    int32_t correction_high = correction_limit;
+
+    /* 同时把PWM零点和MOTOR_MAX纳入抗饱和边界。 */
+    if (wheel->command > 0) {
+        if (correction_low < -wheel->command) {
+            correction_low = -wheel->command;
+        }
+        if (correction_high > MOTOR_MAX - wheel->command) {
+            correction_high = MOTOR_MAX - wheel->command;
+        }
+    } else {
+        if (correction_low < -MOTOR_MAX - wheel->command) {
+            correction_low = -MOTOR_MAX - wheel->command;
+        }
+        if (correction_high > -wheel->command) {
+            correction_high = -wheel->command;
+        }
+    }
+
+    /* 补偿饱和时冻结同方向积分，防止脱困后速度冲高。 */
+    if ((correction_raw > correction_high && error > 0) ||
+        (correction_raw < correction_low && error < 0)) {
+        integral_next = wheel->integral;
+        correction_raw = proportional + integral_next;
+    }
+    wheel->integral = integral_next;
+    int32_t correction = clamp_i32(correction_raw,
+        correction_low, correction_high);
+    int32_t current_correction = wheel->pwm - wheel->command;
+    if (current_correction > 0) {
+        if (correction > current_correction + SPEED_CORRECTION_SLEW_PER_TICK) {
+            correction = current_correction + SPEED_CORRECTION_SLEW_PER_TICK;
+        } else if (correction < -SPEED_CORRECTION_SLEW_PER_TICK) {
+            correction = -SPEED_CORRECTION_SLEW_PER_TICK;
+        }
+    } else if (current_correction < 0) {
+        if (correction < current_correction - SPEED_CORRECTION_SLEW_PER_TICK) {
+            correction = current_correction - SPEED_CORRECTION_SLEW_PER_TICK;
+        } else if (correction > SPEED_CORRECTION_SLEW_PER_TICK) {
+            correction = SPEED_CORRECTION_SLEW_PER_TICK;
+        }
+    } else {
+        correction = clamp_i32(correction,
+            -SPEED_CORRECTION_SLEW_PER_TICK,
+            SPEED_CORRECTION_SLEW_PER_TICK);
+    }
+    correction = clamp_i32(correction, correction_low, correction_high);
+    wheel->pwm = clamp_pwm_to_command_direction(
+        wheel->command, wheel->command + correction);
 #else
     wheel->integral = 0;
     wheel->pwm = wheel->command;
 #endif
 }
 
-static void speed_control_tick(void)
+static int32_t speed_scale_delta(int32_t delta, uint32_t elapsed_ms)
+{
+    if (delta >= 0) {
+        return (delta * SPEED_LOOP_NOMINAL_MS + (int32_t)(elapsed_ms / 2U)) /
+               (int32_t)elapsed_ms;
+    }
+    return -(((-delta) * SPEED_LOOP_NOMINAL_MS +
+              (int32_t)(elapsed_ms / 2U)) / (int32_t)elapsed_ms);
+}
+
+static void speed_resync_wheel(WheelSpeedControl *wheel)
+{
+    wheel->measured = 0;
+    wheel->integral = 0;
+    wheel->pwm = wheel->command;
+    wheel->wrong_dir_ticks = 0;
+    wheel->no_pulse_ticks = 0;
+    wheel->invalid_ticks = 0;
+    wheel->good_feedback_ticks = 0;
+    wheel->feedback_seen = 0;
+}
+
+static void speed_control_tick(uint32_t now)
 {
     static uint8_t divider = 0;
+    static uint8_t sample_ready = 0;
+    static uint8_t last_pivot_mode = 0;
+    static uint32_t sample_last_ms = 0;
     if (++divider < SPEED_LOOP_DIVIDER) return;
     divider = 0;
 
     uint32_t left_now = encoder_left_count;
     uint32_t right_now = encoder_right_count;
+    uint32_t left_invalid_now = encoder_left_invalid;
+    uint32_t right_invalid_now = encoder_right_invalid;
     int32_t left_delta = (int32_t)(left_now - encoder_left_last);
     int32_t right_delta = (int32_t)(right_now - encoder_right_last);
+    uint32_t left_invalid_delta =
+        left_invalid_now - encoder_left_invalid_control_last;
+    uint32_t right_invalid_delta =
+        right_invalid_now - encoder_right_invalid_control_last;
     encoder_left_last = left_now;
     encoder_right_last = right_now;
+    encoder_left_invalid_control_last = left_invalid_now;
+    encoder_right_invalid_control_last = right_invalid_now;
 
-    speed_update_wheel(&speed_left, left_delta * ENCODER_LEFT_SIGN);
-    speed_update_wheel(&speed_right, right_delta * ENCODER_RIGHT_SIGN);
+    uint8_t pivot_mode = (pivot_state == 2);
+    if (pivot_mode != last_pivot_mode) {
+        speed_left.integral = 0;
+        speed_right.integral = 0;
+        speed_left.wrong_dir_ticks = 0;
+        speed_right.wrong_dir_ticks = 0;
+        speed_left.no_pulse_ticks = 0;
+        speed_right.no_pulse_ticks = 0;
+        speed_left.invalid_ticks = 0;
+        speed_right.invalid_ticks = 0;
+        speed_left.good_feedback_ticks = 0;
+        speed_right.good_feedback_ticks = 0;
+        last_pivot_mode = pivot_mode;
+    }
+
+    uint32_t elapsed_ms = now - sample_last_ms;
+    sample_last_ms = now;
+    if (!sample_ready || elapsed_ms < SPEED_SAMPLE_MIN_MS ||
+        elapsed_ms > SPEED_SAMPLE_MAX_MS) {
+        sample_ready = 1;
+        speed_resync_wheel(&speed_left);
+        speed_resync_wheel(&speed_right);
+        motor_pwm(speed_left.pwm, speed_right.pwm);
+        return;
+    }
+
+    left_delta = speed_scale_delta(left_delta, elapsed_ms);
+    right_delta = speed_scale_delta(right_delta, elapsed_ms);
+
+    speed_update_wheel(&speed_left, left_delta * ENCODER_LEFT_SIGN,
+                       left_invalid_delta, elapsed_ms);
+    speed_update_wheel(&speed_right, right_delta * ENCODER_RIGHT_SIGN,
+                       right_invalid_delta, elapsed_ms);
     motor_pwm(speed_left.pwm, speed_right.pwm);
 }
 
@@ -610,7 +1040,7 @@ void TIMER_0_INST_IRQHandler(void)
         uint32_t now = g_millis;
 
         /* ── 每20ms读取双轮编码器并更新PI稳速 ── */
-        speed_control_tick();
+        speed_control_tick(now);
 
         /* ── 陀螺仪解析/在线判定 (掉线自动退回纯灰度) ── */
         gyro_update(now);
@@ -622,11 +1052,14 @@ void TIMER_0_INST_IRQHandler(void)
             static uint32_t dbg_l_invalid_last = 0;
             static uint32_t dbg_r_invalid_last = 0;
             if (++dbg_div >= 25) {
+                uint32_t dbg_l_invalid_snapshot = encoder_left_invalid;
+                uint32_t dbg_r_invalid_snapshot = encoder_right_invalid;
                 dbg_div   = 0;
                 dbg_gz    = gyro_gz;
                 dbg_yaw   = gyro_ok ? gyro_yaw : 0.0f;
                 dbg_ok    = gyro_ok;
                 dbg_turns = turn_accum_deg;
+                dbg_corner_count = corner_count;
                 dbg_l_target   = speed_left.target;
                 dbg_l_measured = speed_left.measured;
                 dbg_l_pwm      = speed_left.pwm;
@@ -635,15 +1068,17 @@ void TIMER_0_INST_IRQHandler(void)
                 dbg_r_pwm      = speed_right.pwm;
                 dbg_encoder_fault =
                     (speed_left.direction_fault ? 1U : 0U) |
-                    (speed_right.direction_fault ? 2U : 0U);
-                if (encoder_left_invalid != dbg_l_invalid_last) {
+                    (speed_right.direction_fault ? 2U : 0U) |
+                    (speed_left.signal_fault ? 16U : 0U) |
+                    (speed_right.signal_fault ? 32U : 0U);
+                if (dbg_l_invalid_snapshot != dbg_l_invalid_last) {
                     dbg_encoder_fault |= 4U;
                 }
-                if (encoder_right_invalid != dbg_r_invalid_last) {
+                if (dbg_r_invalid_snapshot != dbg_r_invalid_last) {
                     dbg_encoder_fault |= 8U;
                 }
-                dbg_l_invalid_last = encoder_left_invalid;
-                dbg_r_invalid_last = encoder_right_invalid;
+                dbg_l_invalid_last = dbg_l_invalid_snapshot;
+                dbg_r_invalid_last = dbg_r_invalid_snapshot;
                 dbg_ready = 1;
             }
         }
@@ -653,6 +1088,7 @@ void TIMER_0_INST_IRQHandler(void)
 
         int8_t  err     = calc_err();
         int32_t abs_err = (err < 0) ? -err : err;
+        uint8_t line_visible = line_is_visible();
 
         /* 最后一弯完成后，回到直道再停车。计弯在 pivot 启动处完成。 */
         {
@@ -663,7 +1099,8 @@ void TIMER_0_INST_IRQHandler(void)
                 uint8_t on_straight = !outer &&
                                       ((sensor[3] == ACTIVE_LEVEL) ||
                                        (sensor[4] == ACTIVE_LEVEL));
-                if (pivot_state == 0 && now >= corner_unlock && on_straight) {
+                if (pivot_state == 0 &&
+                    time_reached(now, corner_unlock) && on_straight) {
                     car_stopped = 1;
                     motor(0, 0);
                     break;
@@ -681,17 +1118,34 @@ void TIMER_0_INST_IRQHandler(void)
          * ─────────────────────────────────────────────────────── */
         uint8_t outer_now = (sensor[0] == ACTIVE_LEVEL) ||
                             (sensor[7] == ACTIVE_LEVEL);
+        int8_t outer_dir_now = 0;
+        if (sensor[7] == ACTIVE_LEVEL && sensor[0] != ACTIVE_LEVEL) {
+            outer_dir_now = 1;
+        } else if (sensor[0] == ACTIVE_LEVEL &&
+                   sensor[7] != ACTIVE_LEVEL) {
+            outer_dir_now = -1;
+        } else if (outer_now) {
+            if (err != 0) {
+                outer_dir_now = (err > 0) ? 1 : -1;
+            } else {
+                /* 对称宽横线没有瞬时方向信息，沿用上一实际转弯方向。 */
+                outer_dir_now = (pivot_dir >= 0) ? 1 : -1;
+            }
+        }
 
         if (pivot_state == 1) {
             /* 直行推进: 定时直行, 到时转 state2 原地转 */
-            if (now >= pivot_t_end) {
+            if (time_reached(now, pivot_t_end)) {
                 pivot_state = 2;
                 pivot_t_end = now + PIVOT_TURN_MS;  /* 原地转计时开始 */
                 pivot_turn_start_ms = now;
                 turn_accum_deg = 0.0f;              /* 复位转弯角度累计器 */
+                turn_abs_deg   = 0.0f;
                 turn_last_frame = gyro_last_cnt;
                 turn_last_yaw   = gyro_yaw;
+                turn_yaw_probe_deg = 0.0f;
                 turn_yaw_sign   = 0;
+                turn_wrong_way  = 0;
                 turn_yaw_ready  = gyro_is_fresh(now);
                 turn_center_hits = 0;
                 turn_line_departed = 0;
@@ -703,6 +1157,7 @@ void TIMER_0_INST_IRQHandler(void)
         }
 
         if (pivot_state == 2) {
+            turn_boost_active = 0;
             /* 原地重转结束条件:
              *   增强: 用新yaw帧累计净转角并平滑减速; 达到目标且灰度回中
              *         才允许提前结束, 避免只到角度但尚未找回赛道
@@ -725,7 +1180,8 @@ void TIMER_0_INST_IRQHandler(void)
                 turn_center_hits = 0;
             }
             uint8_t centered = (turn_center_hits >= TURN_CENTER_CONFIRM_TICKS);
-            uint8_t timed_centered = (now >= pivot_t_end && centered);
+            uint8_t timed_centered =
+                (time_reached(now, pivot_t_end) && centered);
             uint32_t max_turn_ms = PIVOT_MAX_TURN_MS;
 
             int32_t turn_steer = PIVOT_STEER;   /* 默认使用起转全力 */
@@ -738,26 +1194,62 @@ void TIMER_0_INST_IRQHandler(void)
                 if (!turn_yaw_ready) {
                     turn_last_frame = gyro_last_cnt;
                     turn_last_yaw   = gyro_yaw;
+                    turn_yaw_probe_deg = 0.0f;
                     turn_yaw_sign   = 0;
                     turn_yaw_ready  = 1;
                 } else if (gyro_last_cnt != turn_last_frame) {
                     float delta = yaw_delta_deg(gyro_yaw, turn_last_yaw);
                     turn_last_frame = gyro_last_cnt;
                     turn_last_yaw   = gyro_yaw;
-
                     float abs_delta = (delta < 0.0f) ? -delta : delta;
-                    if (turn_yaw_sign == 0 && abs_delta >= TURN_YAW_DIR_MIN) {
-                        turn_yaw_sign = (delta > 0.0f) ? 1 : -1;
-                    }
-                    if (turn_yaw_sign != 0) {
-                        turn_accum_deg += delta * (float)turn_yaw_sign;
+                    turn_abs_deg += abs_delta;
+
+                    if (turn_yaw_sign == 0) {
+                        if (gyro_turn_polarity != 0) {
+                            int8_t expected_sign = (pivot_dir > 0) ?
+                                gyro_turn_polarity : -gyro_turn_polarity;
+                            turn_yaw_probe_deg +=
+                                delta * (float)expected_sign;
+                            if (turn_yaw_probe_deg >=
+                                TURN_YAW_DIR_CONFIRM_DEG) {
+                                turn_yaw_sign = expected_sign;
+                                turn_accum_deg += turn_yaw_probe_deg;
+                                turn_yaw_probe_deg = 0.0f;
+                            } else if (turn_yaw_probe_deg <=
+                                       -TURN_WRONG_WAY_DEG) {
+                                turn_wrong_way = 1;
+                            }
+                        } else {
+                            turn_yaw_probe_deg += delta;
+                            float abs_probe = (turn_yaw_probe_deg < 0.0f) ?
+                                -turn_yaw_probe_deg : turn_yaw_probe_deg;
+                            if (abs_probe >= TURN_YAW_DIR_CONFIRM_DEG) {
+                                turn_yaw_sign =
+                                    (turn_yaw_probe_deg > 0.0f) ? 1 : -1;
+                                turn_accum_deg += abs_probe;
+                                turn_yaw_probe_deg = 0.0f;
+                            }
+                        }
+                    } else {
+                        float directed_delta =
+                            delta * (float)turn_yaw_sign;
+                        turn_accum_deg += directed_delta;
                         if (turn_accum_deg < 0.0f) turn_accum_deg = 0.0f;
+                        if (gyro_turn_polarity != 0) {
+                            turn_yaw_probe_deg += directed_delta;
+                            if (turn_yaw_probe_deg > 0.0f) {
+                                turn_yaw_probe_deg = 0.0f;
+                            } else if (turn_yaw_probe_deg <=
+                                       -TURN_WRONG_WAY_DEG) {
+                                turn_wrong_way = 1;
+                            }
+                        }
                     }
                 }
 
                 float remain = TURN_TARGET_DEG - turn_accum_deg;
                 gyro_target_reached = (remain <= 0.0f);
-                gyro_angle_limit = (turn_accum_deg >= TURN_MAX_DEG);
+                gyro_angle_limit = (turn_abs_deg >= TURN_MAX_DEG);
 
                 float target_rate = TURN_RATE_CRUISE;
                 if (remain < TURN_EASE_DEG) {
@@ -787,26 +1279,54 @@ void TIMER_0_INST_IRQHandler(void)
                 }
                 if (turn_stall_ticks >= TURN_STALL_CONFIRM_TICKS) {
                     turn_steer = PIVOT_STEER_BOOST;
+                    turn_boost_active = 1;
                 }
 
-                if (turn_yaw_sign != 0 &&
+                if ((turn_yaw_sign != 0 || turn_boost_active) &&
                     turn_accum_deg < TURN_MIN_EXIT_DEG) {
                     timed_centered = 0;
                     max_turn_ms = PIVOT_SLOPE_MAX_TURN_MS;
                 }
             } else {
                 turn_yaw_ready = 0;
+                turn_yaw_probe_deg = 0.0f;
+                turn_stall_ticks = 0;
             }
 #endif
-            if (
+            uint8_t turn_confirmed =
 #if GYRO_ENABLE
-                gyro_angle_limit ||
                 (gyro_target_reached && centered) ||
 #endif
-                timed_centered ||
-                ((uint32_t)(now - pivot_turn_start_ms) >= max_turn_ms)) {
+                timed_centered;
+            uint8_t turn_safety_limited =
+#if GYRO_ENABLE
+                gyro_angle_limit || turn_wrong_way;
+#else
+                0;
+#endif
+            uint8_t turn_timed_out =
+                ((uint32_t)(now - pivot_turn_start_ms) >= max_turn_ms);
+            if (turn_confirmed || turn_safety_limited || turn_timed_out) {
                 pivot_state  = 0;
-                pivot_unlock = now + 1000;
+                turn_boost_active = 0;
+                pivot_unlock = now + PIVOT_EXIT_GUARD_MS;
+
+                if (turn_confirmed && !turn_safety_limited &&
+                    !turn_timed_out && corner_pending && !finishing) {
+#if GYRO_ENABLE
+                    if (gyro_turn_polarity == 0 && turn_yaw_sign != 0) {
+                        gyro_turn_polarity = (pivot_dir > 0) ?
+                            turn_yaw_sign : -turn_yaw_sign;
+                    }
+#endif
+                    corner_count++;
+                    if (corner_count >=
+                        (uint16_t)TARGET_LAPS * CORNERS_PER_LAP) {
+                        finishing = 1;
+                        corner_unlock = now + FINISH_RUNOUT_MS;
+                    }
+                }
+                corner_pending = 0;
             } else {
                 motor(PIVOT_CREEP + pivot_dir * turn_steer,
                       PIVOT_CREEP - pivot_dir * turn_steer);
@@ -814,33 +1334,72 @@ void TIMER_0_INST_IRQHandler(void)
             }
         }
 
-        /* state 0: 外侧立即触发；大偏差需连续确认，避免坡面抖动误判。 */
-        if (pivot_state == 0 && now >= pivot_unlock &&
-            now >= corner_unlock && abs_err >= 20) {
-            if (sharp_err_ticks < SHARP_ERR_CONFIRM_TICKS) sharp_err_ticks++;
+        /* 完成一个弯后必须重新看到稳定中线，不能仅靠固定时间解锁。 */
+        uint8_t center_path = (sensor[3] == ACTIVE_LEVEL) ||
+                              (sensor[4] == ACTIVE_LEVEL);
+        if (!corner_armed && !finishing && pivot_state == 0 &&
+            time_reached(now, pivot_unlock) && !outer_now && center_path) {
+            if (corner_rearm_ticks < CORNER_REARM_TICKS) {
+                corner_rearm_ticks++;
+            }
+            if (corner_rearm_ticks >= CORNER_REARM_TICKS) {
+                corner_armed = 1;
+                corner_rearm_ticks = 0;
+            }
+        } else if (!corner_armed) {
+            corner_rearm_ticks = 0;
+        }
+
+        /* state 0: 外侧与大偏差都需连续确认，过滤丢线和单帧毛刺。 */
+        if (!finishing && corner_armed && pivot_state == 0 &&
+            time_reached(now, pivot_unlock) &&
+            time_reached(now, corner_unlock) && outer_dir_now != 0) {
+            if (outer_candidate_dir != outer_dir_now) {
+                outer_candidate_dir = outer_dir_now;
+                outer_confirm_ticks = 1;
+            } else if (outer_confirm_ticks < OUTER_CONFIRM_TICKS) {
+                outer_confirm_ticks++;
+            }
+        } else if (pivot_state == 0) {
+            outer_confirm_ticks = 0;
+            outer_candidate_dir = 0;
+        }
+        uint8_t outer_confirmed =
+            (outer_confirm_ticks >= OUTER_CONFIRM_TICKS);
+
+        if (!finishing && corner_armed && pivot_state == 0 &&
+            time_reached(now, pivot_unlock) &&
+            time_reached(now, corner_unlock) && line_visible && abs_err >= 20) {
+            int8_t sharp_dir_now = (err > 0) ? 1 : -1;
+            if (sharp_candidate_dir != sharp_dir_now) {
+                sharp_candidate_dir = sharp_dir_now;
+                sharp_err_ticks = 1;
+            } else if (sharp_err_ticks < SHARP_ERR_CONFIRM_TICKS) {
+                sharp_err_ticks++;
+            }
         } else if (pivot_state == 0) {
             sharp_err_ticks = 0;
+            sharp_candidate_dir = 0;
         }
         uint8_t sharp_err_confirmed = (sharp_err_ticks >= SHARP_ERR_CONFIRM_TICKS);
 
-        if (pivot_state == 0 && now >= pivot_unlock && now >= corner_unlock &&
-            (outer_now || sharp_err_confirmed)) {
-            if (outer_now) {
-                pivot_dir = (sensor[7] == ACTIVE_LEVEL) ? 1 : -1; /* 右/左 */
+        if (!finishing && corner_armed && pivot_state == 0 &&
+            time_reached(now, pivot_unlock) &&
+            time_reached(now, corner_unlock) &&
+            (outer_confirmed || sharp_err_confirmed)) {
+            if (outer_confirmed) {
+                pivot_dir = outer_candidate_dir;
             } else {
-                pivot_dir = (err > 0) ? 1 : -1;  /* 偏差方向决定转向 */
+                pivot_dir = sharp_candidate_dir;
             }
 
-            /* 一次确认的 pivot 对应一个实际弯，避免采样时序造成漏计。 */
-            if (!finishing) {
-                corner_count++;
-                corner_unlock = now + CORNER_LOCK_MS;
-                if (corner_count >= (uint16_t)TARGET_LAPS * CORNERS_PER_LAP) {
-                    finishing = 1;
-                }
-            }
-
+            corner_pending = 1;
+            corner_armed = 0;
+            corner_rearm_ticks = 0;
+            outer_confirm_ticks = 0;
+            outer_candidate_dir = 0;
             sharp_err_ticks = 0;
+            sharp_candidate_dir = 0;
             pivot_state = 1;
             pivot_t_end = now + PIVOT_ADVANCE_MS;
             motor(PIVOT_ADV_SPEED, PIVOT_ADV_SPEED);
@@ -864,7 +1423,7 @@ void TIMER_0_INST_IRQHandler(void)
          *  gz>0 表示车正在往某方向偏转, 就往反方向补差速把它按住。
          *  掉线(gyro_ok=0)时此项为 0, 完全等价原逻辑。               */
 #if GYRO_ENABLE
-        if (gyro_is_fresh(now) && line_is_visible() && GYRO_DAMP_K > 0 &&
+        if (gyro_is_fresh(now) && line_visible && GYRO_DAMP_K > 0 &&
             abs_err <= GYRO_DAMP_ERRLIM) {
             float damp_dps = gyro_gz;
             if (damp_dps > -GYRO_DAMP_DEADBAND &&
@@ -896,8 +1455,8 @@ int main(void)
 {
     SYSCFG_DL_init();
 
-    /* SysTick: 32MHz / 32000 = 1kHz → 1ms */
-    SysTick->LOAD = 32000UL - 1UL;
+    /* SysTick跟随SysConfig主频，保持1ms节拍。 */
+    SysTick->LOAD = (CPUCLK_FREQ / 1000UL) - 1UL;
     SysTick->VAL  = 0UL;
     SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk
                   | SysTick_CTRL_TICKINT_Msk
@@ -905,8 +1464,9 @@ int main(void)
 
     mux_set(0);
 
-    DL_TimerA_startCounter(PWM_DRIVE_INST);
-    DL_GPIO_setPins(GRP_SLEEP_PORT, GRP_SLEEP_SLEEP_PIN);
+    motor_pwm(0, 0);
+    DL_TimerA_startCounter(PWM_RIGHT_INST);
+    DL_TimerA_startCounter(PWM_LEFT_INST);
     encoder_init();
 
     /* ── 陀螺仪初始化 (可选增强, 失败/未接不影响循迹) ──────────────
@@ -939,6 +1499,7 @@ int main(void)
         float dbg_yaw_snapshot = 0.0f;
         uint8_t dbg_ok_snapshot = 0;
         float dbg_turns_snapshot = 0.0f;
+        uint16_t dbg_corner_count_snapshot = 0;
         int32_t dbg_l_target_snapshot = 0;
         int32_t dbg_l_measured_snapshot = 0;
         int32_t dbg_l_pwm_snapshot = 0;
@@ -955,6 +1516,7 @@ int main(void)
             dbg_yaw_snapshot = dbg_yaw;
             dbg_ok_snapshot = dbg_ok;
             dbg_turns_snapshot = dbg_turns;
+            dbg_corner_count_snapshot = dbg_corner_count;
             dbg_l_target_snapshot = dbg_l_target;
             dbg_l_measured_snapshot = dbg_l_measured;
             dbg_l_pwm_snapshot = dbg_l_pwm;
@@ -969,11 +1531,12 @@ int main(void)
         }
 
         if (dbg_has_sample) {
-            /* lc/rc=目标/实测/PWM；ef位0/1方向错，位2/3为左右非法跳变。 */
+            /* ef位0/1方向错，2/3非法跳变，4/5为左右反馈信号故障。 */
             bt_puts("gz:");    bt_putf1(dbg_gz_snapshot);
             bt_puts(" yaw:");  bt_putf1(dbg_yaw_snapshot);
             bt_puts(" ok:");   bt_putc((uint8_t)('0' + dbg_ok_snapshot));
             bt_puts(" turns:"); bt_putf1(dbg_turns_snapshot);
+            bt_puts(" cc:"); bt_puti(dbg_corner_count_snapshot);
             bt_puts(" lc:"); bt_puti(dbg_l_target_snapshot);
             bt_putc('/');     bt_puti(dbg_l_measured_snapshot);
             bt_putc('/');     bt_puti(dbg_l_pwm_snapshot);

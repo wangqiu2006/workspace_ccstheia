@@ -6,8 +6,8 @@
  * 严格依据《HLK-AS201系列姿态传感器模块说明书 V1.1》第 11 章通信协议实现。
  *
  * 硬件连接:
- *   AS201 UART_TX(引脚15) → MSPM0 PA9  (UART1 RX)
- *   AS201 UART_RX(引脚16) → MSPM0 PA8  (UART1 TX)
+ *   AS201 UART_TX(引脚15) → MSPM0 PA31 (UART0 RX)
+ *   AS201 UART_RX(引脚16) → MSPM0 PA28 (UART0 TX)
  *   AS201 VCC33           → 3.3V
  *   AS201 GND             → GND
  *
