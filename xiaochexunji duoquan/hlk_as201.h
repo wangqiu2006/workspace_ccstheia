@@ -99,6 +99,7 @@ extern "C" {
 /* 缓冲区 */
 #define AS201_RX_BUF_SIZE           256     /* 环形接收缓冲区 */
 #define AS201_FRAME_MAX             64      /* 单帧 cmd..check 最大字节 (数据帧 len=45) */
+#define AS201_ISR_RX_BUDGET         8       /* 单次UART ISR最多搬运字节数 */
 
 /*===========================================================================
  * 转换系数 (说明书第 8~9 页, 原始值为小端 int16, 乘以系数得真实值)
@@ -144,6 +145,11 @@ typedef enum {
 } AS201_Status;
 
 typedef struct {
+    uint16_t processed;  /* 本次已解析的环形缓冲字节数 */
+    bool     pending;    /* 返回瞬间缓冲区是否仍有数据 */
+} AS201_PollResult;
+
+typedef struct {
     /* 硬件绑定 */
     UART_Regs        *uart;
     IRQn_Type         irq;
@@ -177,6 +183,9 @@ typedef struct {
     volatile bool     cfg_valid;                /* 已收到至少一次配置回包     */
 } AS201_Handle;
 
+/* 并发约束：每个句柄只能有一个 Poll/PollBudget 消费者；命令发送与配置
+ * API 也必须由调用方串行化。UART ISR 只能调用 AS201_ISR。 */
+
 /*===========================================================================
  * API
  *===========================================================================*/
@@ -192,6 +201,12 @@ AS201_Status AS201_Init(AS201_Handle *h, UART_Regs *uart, IRQn_Type irq);
 
 /** @brief 主循环轮询解析. 20Hz 全字段上报下, 调用间隔建议 ≤10ms */
 void AS201_Poll(AS201_Handle *h);
+
+/**
+ * @brief 有预算的轮询解析，适合实时控制上下文
+ * @note  单次调用最多处理 max_bytes；不要在实时ISR内因 pending=true 循环调用
+ */
+AS201_PollResult AS201_PollBudget(AS201_Handle *h, uint16_t max_bytes);
 
 /** @brief 取最新数据 (只读) */
 const AS201_Data *AS201_GetData(const AS201_Handle *h);

@@ -164,15 +164,14 @@ static bool parse_data_report(AS201_Handle *h, const uint8_t *f, uint8_t flen)
     }
     if (sub & AS201_SUB_PRESSURE) {
         if (p + 4 > end) return false;
-        h->data.pressure = rd_i32(p) * AS201_K_PRESSURE;
+        h->data.pressure = (float)rd_i32(p) * AS201_K_PRESSURE;
         h->data.update_flags |= AS201_SUB_PRESSURE;
         p += 4;
     }
     if (sub & AS201_SUB_HEIGHT) {
         if (p + 4 > end) return false;
-        h->data.height = rd_i32(p) * AS201_K_HEIGHT;
+        h->data.height = (float)rd_i32(p) * AS201_K_HEIGHT;
         h->data.update_flags |= AS201_SUB_HEIGHT;
-        p += 4;
     }
     return true;
 }
@@ -316,11 +315,23 @@ AS201_Status AS201_Init(AS201_Handle *h, UART_Regs *uart, IRQn_Type irq)
     return AS201_OK;
 }
 
+AS201_PollResult AS201_PollBudget(AS201_Handle *h, uint16_t max_bytes)
+{
+    AS201_PollResult result = {0U, false};
+    if (h == NULL || h->uart == NULL) return result;
+
+    uint8_t b;
+    while (result.processed < max_bytes && buf_get(h, &b)) {
+        fsm(h, b);
+        result.processed++;
+    }
+    result.pending = (h->rx_head != h->rx_tail);
+    return result;
+}
+
 void AS201_Poll(AS201_Handle *h)
 {
-    if (h == NULL || h->uart == NULL) return;
-    uint8_t b;
-    while (buf_get(h, &b)) fsm(h, b);
+    (void)AS201_PollBudget(h, UINT16_MAX);
 }
 
 const AS201_Data *AS201_GetData(const AS201_Handle *h)
@@ -502,9 +513,12 @@ void AS201_ISR(AS201_Handle *h)
 
     /* MSPM0 的 IIDX 是"索引值", 不是位掩码, 必须用 == 判断 */
     switch (DL_UART_Main_getPendingInterrupt(h->uart)) {
-    case DL_UART_MAIN_IIDX_RX:
-        /* RX FIFO 阈值可能 >1, 循环取空 */
-        while (DL_UART_Main_isRXFIFOEmpty(h->uart) == false) {
+    case DL_UART_MAIN_IIDX_RX: {
+        /* 有界搬运；剩余FIFO数据由后续RX中断继续处理。 */
+        uint8_t budget = AS201_ISR_RX_BUDGET;
+        while (budget > 0U &&
+               DL_UART_Main_isRXFIFOEmpty(h->uart) == false) {
+            budget--;
             uint8_t  d    = DL_UART_Main_receiveData(h->uart);
             uint16_t next = (uint16_t)((h->rx_head + 1) % AS201_RX_BUF_SIZE);
             /* SPSC 环形队列: 生产者(本 ISR)只写 head, 消费者(Poll)只写 tail.
@@ -518,6 +532,7 @@ void AS201_ISR(AS201_Handle *h)
             h->rx_head = next;
         }
         break;
+    }
     default:
         break;
     }
