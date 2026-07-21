@@ -178,29 +178,25 @@ extern "C" {
 #define GRP_GRAY_AD2_PORT                                                (GPIOA)
 #define GRP_GRAY_AD2_PIN                                        (DL_GPIO_PIN_27)
 #define GRP_GRAY_AD2_IOMUX                                       (IOMUX_PINCM60)
+/* Port definition for Pin Group GRP_ENCODER */
+#define GRP_ENCODER_PORT                                                 (GPIOB)
+
 /* Defines for LEFT_A: GPIOB.23 with pinCMx 51 on package pin 22 */
-#define GRP_ENCODER_LEFT_A_PORT                                          (GPIOB)
-// pins affected by this interrupt request:["LEFT_A","LEFT_B","RIGHT_B"]
-#define GRP_ENCODER_GPIOB_INT_IRQN                              (GPIOB_INT_IRQn)
-#define GRP_ENCODER_GPIOB_INT_IIDX              (DL_INTERRUPT_GROUP1_IIDX_GPIOB)
+// pins affected by this interrupt request:["LEFT_A","LEFT_B","RIGHT_A","RIGHT_B"]
+#define GRP_ENCODER_INT_IRQN                                    (GPIOB_INT_IRQn)
+#define GRP_ENCODER_INT_IIDX                    (DL_INTERRUPT_GROUP1_IIDX_GPIOB)
 #define GRP_ENCODER_LEFT_A_IIDX                             (DL_GPIO_IIDX_DIO23)
 #define GRP_ENCODER_LEFT_A_PIN                                  (DL_GPIO_PIN_23)
 #define GRP_ENCODER_LEFT_A_IOMUX                                 (IOMUX_PINCM51)
 /* Defines for LEFT_B: GPIOB.27 with pinCMx 58 on package pin 29 */
-#define GRP_ENCODER_LEFT_B_PORT                                          (GPIOB)
 #define GRP_ENCODER_LEFT_B_IIDX                             (DL_GPIO_IIDX_DIO27)
 #define GRP_ENCODER_LEFT_B_PIN                                  (DL_GPIO_PIN_27)
 #define GRP_ENCODER_LEFT_B_IOMUX                                 (IOMUX_PINCM58)
-/* Defines for RIGHT_A: GPIOA.18 with pinCMx 40 on package pin 11 */
-#define GRP_ENCODER_RIGHT_A_PORT                                         (GPIOA)
-// pins affected by this interrupt request:["RIGHT_A"]
-#define GRP_ENCODER_GPIOA_INT_IRQN                              (GPIOA_INT_IRQn)
-#define GRP_ENCODER_GPIOA_INT_IIDX              (DL_INTERRUPT_GROUP1_IIDX_GPIOA)
-#define GRP_ENCODER_RIGHT_A_IIDX                            (DL_GPIO_IIDX_DIO18)
-#define GRP_ENCODER_RIGHT_A_PIN                                 (DL_GPIO_PIN_18)
-#define GRP_ENCODER_RIGHT_A_IOMUX                                (IOMUX_PINCM40)
+/* Defines for RIGHT_A: GPIOB.11 with pinCMx 28 on package pin 63 */
+#define GRP_ENCODER_RIGHT_A_IIDX                            (DL_GPIO_IIDX_DIO11)
+#define GRP_ENCODER_RIGHT_A_PIN                                 (DL_GPIO_PIN_11)
+#define GRP_ENCODER_RIGHT_A_IOMUX                                (IOMUX_PINCM28)
 /* Defines for RIGHT_B: GPIOB.14 with pinCMx 31 on package pin 2 */
-#define GRP_ENCODER_RIGHT_B_PORT                                         (GPIOB)
 #define GRP_ENCODER_RIGHT_B_IIDX                            (DL_GPIO_IIDX_DIO14)
 #define GRP_ENCODER_RIGHT_B_PIN                                 (DL_GPIO_PIN_14)
 #define GRP_ENCODER_RIGHT_B_IOMUX                                (IOMUX_PINCM31)

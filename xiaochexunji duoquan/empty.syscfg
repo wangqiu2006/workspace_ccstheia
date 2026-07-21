@@ -12,16 +12,12 @@
 const GPIO   = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const GPIO1  = GPIO.addInstance();
 const GPIO2  = GPIO.addInstance();
-const GPIO4  = GPIO.addInstance();
+const GPIO3  = GPIO.addInstance();
 const PWM    = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const PWM1   = PWM.addInstance();
-const PWM2   = PWM.addInstance();
 const SYSCTL = scripting.addModule("/ti/driverlib/SYSCTL");
 const TIMER  = scripting.addModule("/ti/driverlib/TIMER", {}, false);
 const TIMER1 = TIMER.addInstance();
-const UART   = scripting.addModule("/ti/driverlib/UART", {}, false);
-const UART1  = UART.addInstance();
-const UART2  = UART.addInstance();
 
 /**
  * Write custom configuration values to the imported modules.
@@ -29,53 +25,26 @@ const UART2  = UART.addInstance();
 GPIO1.$name                         = "GRP_GRAY";
 GPIO1.associatedPins.create(3);
 GPIO1.associatedPins[0].$name       = "AD0";
-GPIO1.associatedPins[0].pin.$assign = "PB25";
+GPIO1.associatedPins[0].pin.$assign = "PA24";
 GPIO1.associatedPins[1].$name       = "AD1";
 GPIO1.associatedPins[1].pin.$assign = "PA25";
 GPIO1.associatedPins[2].$name       = "AD2";
-GPIO1.associatedPins[2].pin.$assign = "PA27";
+GPIO1.associatedPins[2].pin.$assign = "PA26";
 
 const Board = scripting.addModule("/ti/driverlib/Board", {}, false);
 
 GPIO2.$name                         = "GRP_GRAY_OUT";
 GPIO2.associatedPins[0].$name       = "OUT";
 GPIO2.associatedPins[0].direction   = "INPUT";
-GPIO2.associatedPins[0].pin.$assign = "PB20";
+GPIO2.associatedPins[0].pin.$assign = "PA27";
 
-/* MG513X-P28 A/B quadrature encoders: GPIO both-edge interrupts, software x4 decoding.
- * U6/A-motor/ENCA is the left wheel; U4/B-motor/ENCB is the right wheel. */
-GPIO4.$name = "GRP_ENCODER";
-GPIO4.associatedPins.create(4);
-GPIO4.associatedPins[0].$name       = "LEFT_A";
-GPIO4.associatedPins[0].direction   = "INPUT";
-GPIO4.associatedPins[0].inputFilter = "3_CYCLES";
-GPIO4.associatedPins[0].interruptEn = true;
-GPIO4.associatedPins[0].polarity    = "RISE_FALL";
-GPIO4.associatedPins[0].pin.$assign = "PB23";
-GPIO4.associatedPins[1].$name       = "LEFT_B";
-GPIO4.associatedPins[1].direction   = "INPUT";
-GPIO4.associatedPins[1].inputFilter = "3_CYCLES";
-GPIO4.associatedPins[1].interruptEn = true;
-GPIO4.associatedPins[1].polarity    = "RISE_FALL";
-GPIO4.associatedPins[1].pin.$assign = "PB27";
-GPIO4.associatedPins[2].$name       = "RIGHT_A";
-GPIO4.associatedPins[2].direction   = "INPUT";
-GPIO4.associatedPins[2].inputFilter = "3_CYCLES";
-GPIO4.associatedPins[2].interruptEn = true;
-GPIO4.associatedPins[2].polarity    = "RISE_FALL";
-GPIO4.associatedPins[2].pin.$assign = "PA18";
-GPIO4.associatedPins[3].$name       = "RIGHT_B";
-GPIO4.associatedPins[3].direction   = "INPUT";
-GPIO4.associatedPins[3].inputFilter = "3_CYCLES";
-GPIO4.associatedPins[3].interruptEn = true;
-GPIO4.associatedPins[3].polarity    = "RISE_FALL";
-GPIO4.associatedPins[3].pin.$assign = "PB14";
+GPIO3.$name                         = "GRP_SLEEP";
+GPIO3.associatedPins[0].$name       = "SLEEP";
+GPIO3.associatedPins[0].pin.$assign = "PB16";
 
-/* AT8236 B bridge/right wheel: schematic PWM1=PA0, PWM2=PA1.
- * PA0/PA1 are open-drain; the PCB must provide external pull-up resistors. */
-PWM1.$name                              = "PWM_RIGHT";
+PWM1.$name                              = "PWM_DRIVE";
 PWM1.timerCount                         = 3200;
-PWM1.ccIndex                            = [0,1];
+PWM1.ccIndex                            = [0,1,2,3];
 PWM1.PWM_CHANNEL_0.$name                = "ti_driverlib_pwm_PWMTimerCC0";
 PWM1.PWM_CHANNEL_1.$name                = "ti_driverlib_pwm_PWMTimerCC1";
 PWM1.ccp0PinConfig.direction            = scripting.forceWrite("OUTPUT");
@@ -89,28 +58,14 @@ PWM1.ccp1PinConfig.onlyInternalResistor = scripting.forceWrite(false);
 PWM1.ccp1PinConfig.passedPeripheralType = scripting.forceWrite("Digital");
 PWM1.ccp1PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric2";
 PWM1.peripheral.$assign                 = "TIMA0";
-PWM1.peripheral.ccp0Pin.$assign         = "PA0";
-PWM1.peripheral.ccp1Pin.$assign         = "PA1";
-
-/* AT8236 A bridge/left wheel: PWM3=PA10, PWM4=PA11 on TIMA1. */
-PWM2.$name                              = "PWM_LEFT";
-PWM2.timerCount                         = 3200;
-PWM2.ccIndex                            = [0,1];
-PWM2.PWM_CHANNEL_0.$name                = "ti_driverlib_pwm_PWMTimerCC2";
-PWM2.PWM_CHANNEL_1.$name                = "ti_driverlib_pwm_PWMTimerCC3";
-PWM2.ccp0PinConfig.direction            = scripting.forceWrite("OUTPUT");
-PWM2.ccp0PinConfig.hideOutputInversion  = scripting.forceWrite(false);
-PWM2.ccp0PinConfig.onlyInternalResistor = scripting.forceWrite(false);
-PWM2.ccp0PinConfig.passedPeripheralType = scripting.forceWrite("Digital");
-PWM2.ccp0PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric3";
-PWM2.ccp1PinConfig.direction            = scripting.forceWrite("OUTPUT");
-PWM2.ccp1PinConfig.hideOutputInversion  = scripting.forceWrite(false);
-PWM2.ccp1PinConfig.onlyInternalResistor = scripting.forceWrite(false);
-PWM2.ccp1PinConfig.passedPeripheralType = scripting.forceWrite("Digital");
-PWM2.ccp1PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric4";
-PWM2.peripheral.$assign                 = "TIMA1";
-PWM2.peripheral.ccp0Pin.$assign         = "PA10";
-PWM2.peripheral.ccp1Pin.$assign         = "PA11";
+PWM1.peripheral.ccp0Pin.$assign         = "PB14";
+PWM1.peripheral.ccp1Pin.$assign         = "PA7";
+PWM1.peripheral.ccp2Pin.$assign         = "PA15";
+PWM1.peripheral.ccp3Pin.$assign         = "PA12";
+PWM1.PWM_CHANNEL_2.$name                = "ti_driverlib_pwm_PWMTimerCC2";
+PWM1.PWM_CHANNEL_3.$name                = "ti_driverlib_pwm_PWMTimerCC3";
+PWM1.ccp2PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric3";
+PWM1.ccp3PinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric4";
 
 SYSCTL.forceDefaultClkConfig = true;
 
@@ -120,25 +75,6 @@ TIMER1.timerClkDiv                 = 1;
 TIMER1.timerPeriod                 = "0.5 ms";
 TIMER1.interrupts                  = ["ZERO"];
 TIMER1.peripheral.$assign          = "TIMG0";
-
-/* HLK-AS201 接扩展板串口0: 115200-8-N-1, 使能 RX 中断 */
-UART1.$name                            = "UART_GYRO";
-UART1.enabledInterrupts                = ["RX"];
-UART1.targetBaudRate                   = 115200;
-UART1.peripheral.$assign               = "UART0";
-UART1.peripheral.rxPin.$assign         = "PA31";
-UART1.peripheral.txPin.$assign         = "PA28";
-UART1.txPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric5";
-UART1.rxPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric6";
-
-/* 板载蓝牙接扩展板“串口3”网络；PA21/PA22 实际属于 MCU UART2。 */
-UART2.$name                            = "UART_BT";
-UART2.targetBaudRate                   = 115200;
-UART2.peripheral.$assign               = "UART2";
-UART2.peripheral.txPin.$assign         = "PA21";
-UART2.peripheral.rxPin.$assign         = "PA22";
-UART2.txPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric7";
-UART2.rxPinConfig.$name                = "ti_driverlib_gpio_GPIOPinGeneric8";
 
 /**
  * Pinmux solution for unlocked pins/peripherals. This ensures that minor changes to the automatic solver in a future
